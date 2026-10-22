@@ -1,0 +1,71 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug:
+    name: assembleDebug (APK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # GitHub 的 ubuntu-latest 自带 Android SDK，但 compileSdk 36 / build-tools 36.0.0
+      # 可能还没下。best-effort 补装：路径随镜像版本变化，缺失也交给 AGP 自动下载，
+      # 所以这一步失败不阻断（|| true）。
+      - name: Ensure Android SDK (android-36 / build-tools 36.0.0)
+        continue-on-error: true
+        run: |
+          SDKM="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(command -v sdkmanager || true)"
+          [ -n "$SDKM" ] || SDKM="$(find /usr/local/lib/android/sdk -name sdkmanager -type f | head -1 || true)"
+          if [ -n "$SDKM" ] && [ -x "$SDKM" ]; then
+            yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+            "$SDKM" "platforms;android-36" "build-tools;36.0.0" "platform-tools" || true
+          fi
+
+      - name: Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Assemble debug APK
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Collect APK with version in name
+        id: collect
+        run: |
+          set -e
+          SRC=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$SRC"
+          VER=$(grep -oE 'versionName[[:space:]]*=[[:space:]]*"[^"]+"' app/build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          VER=${VER:-unknown}
+          OUT="artifacts/TraeWork2API-${VER}-debug.apk"
+          mkdir -p artifacts
+          cp "$SRC" "$OUT"
+          echo "apk_path=$OUT" >> "$GITHUB_OUTPUT"
+          echo "Built $OUT ($(du -h "$OUT" | cut -f1))"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TraeWork2API-debug-${{ github.sha }}
+          path: ${{ steps.collect.outputs.apk_path }}
+          if-no-files-found: error
