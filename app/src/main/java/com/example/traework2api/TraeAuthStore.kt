@@ -35,6 +35,8 @@ object TraeAuthStore {
 
     private const val KEY_INDEX = "trae_accounts"   // JSON 数组
     private const val KEY_ACTIVE = "trae_active_uid"
+    /** 导出 JSON 的格式标识，导入时用来辨认是不是本 App 导出的文件。 */
+    const val EXPORT_FORMAT = "traework2api-accounts"
 
     // 旧版单账号 key（仅用于迁移）
     private const val LEGACY_ACCESS = "trae_access"
@@ -164,6 +166,20 @@ object TraeAuthStore {
         writeMeta(context, meta)
     }
 
+    /**
+     * 只更新**某个账号的 token**（access/refresh），**不改当前选中账号**。
+     *
+     * 与 [save] 的区别：[save] 会把传入账号设为当前账号，后台批量续期/签到绝不能偷偷切号，
+     * 所以那条路径用本方法。账号不存在则忽略（不新建）。
+     */
+    fun updateTokens(context: Context, cred: Cred) {
+        if (readIndex(context).none { it.uid == cred.uid }) return
+        prefs(context).edit()
+            .putString(accessKey(cred.uid), encrypt(cred.accessToken))
+            .putString(refreshKey(cred.uid), encrypt(cred.refreshToken))
+            .apply()
+    }
+
     /** 删除账号（连密文一起删）。若删的是当前账号，自动切到剩下的第一个。 */
     fun remove(context: Context, uid: String) {
         val metas = readIndex(context).filterNot { it.uid == uid }
@@ -176,6 +192,91 @@ object TraeAuthStore {
         if (p.getString(KEY_ACTIVE, null) == uid) {
             p.edit().putString(KEY_ACTIVE, metas.firstOrNull()?.uid.orEmpty()).apply()
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 导出 / 导入（JSON 明文，换设备一键登录用）
+    // ------------------------------------------------------------------
+
+    /**
+     * 把全部账号导出成 JSON 字符串。⚠️ **含明文 access/refresh token**。
+     *
+     * 为什么是明文：token 平时用 AndroidKeyStore（AES-GCM）加密落盘，而 KeyStore 主密钥
+     * **绑死这台设备**，导出的密文到另一台手机根本解不开。要"换设备一键登录"，
+     * 导出的就只能是明文 token，导入方再用自己的 KeyStore 重新加密。
+     * 因此导出的文件等价于"账号钥匙"，只走本地文件/剪贴板，绝不联网、绝不写日志。
+     *
+     * 结构：`{"format":"traework2api-accounts","version":1,"activeUid":"…","accounts":[{…}]}`
+     */
+    fun exportJson(context: Context): String {
+        val metas = list(context)
+        val arr = JSONArray()
+        for (m in metas) {
+            val cred = loadByUid(context, m.uid) ?: continue
+            arr.put(JSONObject()
+                .put("uid", cred.uid)
+                .put("nickname", cred.nickname)
+                .put("region", cred.regionId)
+                .put("expiresAt", cred.expiresAt)
+                .put("accessToken", cred.accessToken)
+                .put("refreshToken", cred.refreshToken))
+        }
+        return JSONObject()
+            .put("format", EXPORT_FORMAT)
+            .put("version", 1)
+            .put("activeUid", activeUid(context).orEmpty())
+            .put("accounts", arr)
+            .toString(2)
+    }
+
+    /**
+     * 从 [exportJson] 那种 JSON 导入账号：按 uid 合并写回（新设备用本机 KeyStore 重新加密），
+     * 同名 uid 覆盖、新 uid 追加。导入后**不**自动改当前账号，除非文件里带 `activeUid` 且它存在。
+     * 兼容直接给出顶层数组（无外壳）的老格式。
+     *
+     * @return 成功导入的账号数。解析失败抛异常（消息给人话）。
+     */
+    fun importJson(context: Context, json: String): Int {
+        val rootOpt = try { JSONObject(json) } catch (_: Exception) { null }
+        val accounts: JSONArray = when {
+            // 标准外壳：{format,version,activeUid,accounts:[…]}
+            rootOpt != null -> rootOpt.optJSONArray("accounts") ?: JSONArray()
+            // 兼容老格式：顶层直接是账号数组
+            else -> try { JSONArray(json) } catch (e: Exception) { throw IllegalArgumentException("不是有效的账号 JSON") }
+        }
+        var imported = 0
+        for (i in 0 until accounts.length()) {
+            val o = accounts.optJSONObject(i) ?: continue
+            val uid = o.optString("uid", "").takeIf { it.isNotBlank() } ?: continue
+            val access = o.optString("accessToken", "")
+            if (access.isBlank()) continue
+            val cred = Cred(
+                accessToken = access,
+                refreshToken = o.optString("refreshToken", ""),
+                expiresAt = o.optLong("expiresAt", 0L),
+                uid = uid,
+                nickname = o.optString("nickname", ""),
+                regionId = o.optString("region", TraeRegion.CN.id),
+            )
+            // 走 addWithoutSetActive，避免每个账号都把当前号切成它
+            importOne(context, cred)
+            imported++
+        }
+        check(imported > 0) { "JSON 里没有可导入的账号（缺 uid 或 accessToken）" }
+        // 若文件带了 activeUid 且该账号在导入结果里，则把当前账号设成它（换设备保持同一个号）
+        val active = rootOpt?.optString("activeUid", "")?.takeIf { it.isNotBlank() }
+        if (active != null && readIndex(context).any { it.uid == active }) setActive(context, active)
+        return imported
+    }
+
+    /** 导入单个账号：写 token + 元数据，但不动当前选中账号。 */
+    private fun importOne(context: Context, cred: Cred) {
+        val p = prefs(context)
+        p.edit()
+            .putString(accessKey(cred.uid), encrypt(cred.accessToken))
+            .putString(refreshKey(cred.uid), encrypt(cred.refreshToken))
+            .apply()
+        writeMeta(context, cred.toMeta())
     }
 
     // ------------------------------------------------------------------

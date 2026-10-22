@@ -88,11 +88,15 @@ object Gateway {
         server = s
         s.start()
         android.util.Log.i(TAG, "网关已启动，端口 ${LocalFakeServer.PORT}")
+        // 服务在跑 = 用户在用额度 → 拉起积分监测（每 2s 查当前账号积分，用完自动换号）。
+        // 与网关同生命周期：网关停了就没人消耗额度，监测也该停（省电/省上游请求）。
+        CreditMonitor.start(app)
     }
 
     /** 幂等停止：没启动时调用也安全（用户可能没开就退出）。 */
     @Synchronized
     fun stop() {
+        CreditMonitor.stop()
         server?.stop()
         server = null
         android.util.Log.i(TAG, "网关已停止")

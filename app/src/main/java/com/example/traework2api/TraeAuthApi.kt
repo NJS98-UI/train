@@ -166,16 +166,20 @@ object TraeAuthApi {
         val expiresAt: Long?,       // unix 秒；null=未返回有效期
     )
 
-    /** refresh token 换 access token（refreshToken 轮换）。网络/结构错误抛异常。 */
-    fun exchangeToken(refreshToken: String): ExchangeResult {
+    /** refresh token 换 access token（refreshToken 轮换）。网络/结构错误抛异常。
+     *
+     * [region] 默认取当前区域；**多账号后台续期/签到**必须传**该账号自己的区域**，
+     * 否则会拿 A 区域的 token 打到 B 区域的 OAuth host（区域串号，实测踩过）。
+     */
+    fun exchangeToken(refreshToken: String, region: TraeRegion = region()): ExchangeResult {
         val body = JSONObject()
-            .put("ClientID", CLIENT_ID)
+            .put("ClientID", region.clientId)
             .put("RefreshToken", refreshToken)
             .put("ClientSecret", "-")
             .put("UserID", "")
             .toString()
         val req = Request.Builder()
-            .url(OAUTH_HOST + EP_EXCHANGE)
+            .url(region.oauthHost + EP_EXCHANGE)
             .post(body.toRequestBody(JSON.toMediaType()))
             .header("Content-Type", JSON)
             .header("Accept", JSON)
@@ -260,6 +264,29 @@ object TraeAuthApi {
             regionId = cred.regionId,
         ))
         Log.i(TAG, "续期成功 (新exp=${ex.expiresAt ?: cred.expiresAt}, refresh轮换=${ex.refreshToken != null})")
+        return ex.accessToken
+    }
+
+    /**
+     * 对**指定账号**取有效 token（临期/过期就用它自己的 refreshToken 续），**不改当前账号、不翻全局区域**。
+     *
+     * 与 [restartWithValidToken] 的区别：那个作用于"当前账号"并会临时切换 [TraeRegion.current]；
+     * 这里给积分监测器扫描**其它候选账号**用——必须按各自 [Cred.region] 续、按 [Cred] 写回，
+     * 绝不能因为探测别的号就把用户正在用的当前账号切走或污染全局区域。
+     * 续期失败时回落到已存的（可能过期的）access token，行为与原逻辑一致。
+     */
+    fun restartWithValidTokenFor(context: Context, cred: TraeAuthStore.Cred, skewSec: Long): String? {
+        if (cred.accessToken.isNotBlank() && !expiredWithin(cred.expiresAt, skewSec)) return cred.accessToken
+        if (cred.refreshToken.isBlank()) return cred.accessToken.takeIf { it.isNotBlank() }
+        val ex = runCatching { exchangeToken(cred.refreshToken, cred.region) }
+            .getOrElse { Log.w(TAG, "候选账号 ${cred.uid} 续期失败: ${it.message}"); return cred.accessToken.takeIf { t -> t.isNotBlank() } }
+        val newCred = cred.copy(
+            accessToken = ex.accessToken,
+            refreshToken = ex.refreshToken ?: cred.refreshToken,
+            expiresAt = ex.expiresAt ?: cred.expiresAt,
+        )
+        TraeAuthStore.updateTokens(context, newCred)   // 不碰 active
+        TraeAuthStore.updateMeta(context, newCred.toMeta())
         return ex.accessToken
     }
 

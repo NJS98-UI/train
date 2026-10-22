@@ -292,8 +292,8 @@ object TraeUpstream {
      * 校验：`consumed_amount / total_amount` 与上游给的 `consumption_ratio` 逐位吻合
      * （1931.46 / 5100 = 0.37871764705882355），确认这两个字段就是"池内已用 / 池总量"。
      */
-    fun fetchUsage(tok: String, uid: String): Long? {
-        val reg = TraeRegion.current   // 快照：见文件头 region 说明
+    fun fetchUsage(tok: String, uid: String, region: TraeRegion = TraeRegion.current): Long? {
+        val reg = region   // 快照：见文件头 region 说明；多账号轮询要按账号自身区域查
         if (!reg.canQueryQuota) return null
         val sum = ug(tok, reg.ugHost + EP_ENT_USAGE, uid, reg)?.optJSONObject("usage_summary") ?: return null
         val total = sum.optDouble("total_amount", -1.0)
@@ -314,8 +314,8 @@ object TraeUpstream {
      */
     data class CheckinStatus(val checkedIn: Boolean, val credits: Long, val enable: Boolean)
 
-    fun fetchCheckin(tok: String, uid: String): CheckinStatus? {
-        val reg = TraeRegion.current   // 快照：见文件头 region 说明
+    fun fetchCheckin(tok: String, uid: String, region: TraeRegion = TraeRegion.current): CheckinStatus? {
+        val reg = region   // 快照：见文件头 region 说明
         if (!reg.canQueryQuota) return null
         val root = ug(tok, reg.ugHost + EP_CHECKIN_STATUS, uid, reg) ?: return null
         return parseCheckin(root)
@@ -344,8 +344,8 @@ object TraeUpstream {
      * 而上游业务失败时也回 **HTTP 200 + 业务体**，所以被拒也可能带 `code` 回来。
      * 成功与否由 [checkinSucceeded]（"成功码 AND 状态跃迁"的合取）判定，`code` 只用于文案。
      */
-    fun claimCheckin(tok: String, uid: String): Int? {
-        val reg = TraeRegion.current   // 快照：见文件头 region 说明
+    fun claimCheckin(tok: String, uid: String, region: TraeRegion = TraeRegion.current): Int? {
+        val reg = region   // 快照：见文件头 region 说明
         if (!reg.canQueryQuota) return null
         return ug(tok, reg.ugHost + EP_CLAIM, uid, reg)?.optInt("code", -1)
     }

@@ -6,9 +6,11 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
@@ -40,6 +42,10 @@ class MainActivity : Activity() {
     companion object {
         /** 通知权限请求码（Android 13+ 前台服务的常驻通知要用）。 */
         private const val REQ_NOTIF = 1002
+        /** SAF：导出账号 JSON（创建文档）。 */
+        private const val REQ_EXPORT = 1003
+        /** SAF：导入账号 JSON（打开文档）。 */
+        private const val REQ_IMPORT = 1004
         private const val SIXTY_MINUTES_SEC = 3600L
         /** 模型页刷新按钮文案：空状态卡与工具条共用同一份，改一处两边同步。 */
         private const val REFRESH_MODELS_LABEL = "刷新模型目录"
@@ -146,6 +152,12 @@ class MainActivity : Activity() {
     private var serviceBusy: String? = null
     /** 积分刷新进行中：数值位显示「…」，否则用户点了「刷新」会觉得没反应。 */
     private var quotaLoading = false
+    /** 待写入 SAF 的备份 JSON（导出账号点「保存」后暂存，onActivityResult 拿到 Uri 再落盘）。 */
+    private var pendingExportJson: String? = null
+    /** 当前 Qoder 账号积分余量（监测器回填，仅展示）。null=未拉到/无账号。 */
+    private var qoderRemaining: Double? = null
+    /** 「积分与用量」/「Qoder 账号」卡里会被监测器原地刷新的控件。 */
+    private var monitorApply: (() -> Unit)? = null
     /**
      * 「积分与用量」卡里那几个会被刷新改掉的控件 —— 刷新时**原地改文字**，不重建页面。
      *
@@ -196,6 +208,13 @@ class MainActivity : Activity() {
         TraeRegion.selfCheck()
         // 多账号索引自检：uid 是主键，序列化错了会串账号。
         TraeAuthStore.selfCheck()
+        // Qoder 账号索引 + OpenAPI 端点 + 积分判据自检（uid 串了会换错号）。
+        QoderAuthStore.selfCheck()
+        QoderAuthApi.selfCheck()
+        // 备份文件（Trae+Qoder 合并）格式识别自检：认错了会把 Trae 备份喂给 Qoder 解析。
+        AccountBackup.selfCheck()
+        // 积分监测换号阈值边界自检。
+        CreditMonitor.selfCheck()
         // 续期判定边界自检：服务现在每个请求都靠它决定要不要续期，判错就是持续 401。
         TraeAuthApi.selfCheck()
         // 国际服 plan_item 累积快照 → 增量的 diff 自检（错则客户端看到内容重复）
@@ -321,6 +340,7 @@ class MainActivity : Activity() {
         // 页面要重建了，旧的"原地刷新"句柄作废（accountPage / modelsPage 构建时会重新登记）
         quotaApply = null
         modelsRefreshApply = null
+        monitorApply = null
         pageTitle.text = page.title
         pageSubtitle.text = page.subtitle
         contentHost.removeAllViews()
@@ -621,6 +641,262 @@ class MainActivity : Activity() {
                 addView(rewardView, lp(-2, -2, start = 12))
             }, top(14))
         })
+
+        // ---- 积分监测 · 自动换号 ----
+        var autoSwitchLabel: TextView? = null
+        var thresholdLabel: TextView? = null
+        var qoderCreditView: TextView? = null
+        addView(card {
+            addView(text("积分监测（每 2 秒）", FS_CARD_TITLE, true))
+            addView(caption("服务运行时每 2 秒检测当前账号积分；当前账号用完就自动切到还有积分的账号。"), top(6))
+            autoSwitchLabel = linkAction(
+                if (CreditMonitor.isAutoSwitchEnabled(this@MainActivity)) "自动换号：开" else "自动换号：关"
+            ) {
+                val nv = !CreditMonitor.isAutoSwitchEnabled(this@MainActivity)
+                CreditMonitor.setAutoSwitchEnabled(this@MainActivity, nv)
+                autoSwitchLabel?.text = if (nv) "自动换号：开" else "自动换号：关"
+            }
+            thresholdLabel = linkAction("换号阈值：≤ ${CreditMonitor.threshold(this@MainActivity)}") {
+                val cur = CreditMonitor.threshold(this@MainActivity)
+                val next = when (cur) { 0L -> 5L; 5L -> 20L; else -> 0L }
+                CreditMonitor.setThreshold(this@MainActivity, next)
+                thresholdLabel?.text = "换号阈值：≤ $next"
+            }
+            addView(row(top = 12) {
+                addView(autoSwitchLabel!!, weighted())
+                addView(thresholdLabel!!, weighted(start = 8))
+            })
+        })
+
+        // ---- 账号导出 / 导入（JSON，换设备一键登录）----
+        addView(card {
+            addView(text("账号导出 / 导入（JSON）", FS_CARD_TITLE, true))
+            addView(caption("导出包含全部 Trae + Qoder 账号的明文 token/PAT（等于账号钥匙，请妥善保管）。" +
+                "换设备时在新机导入即可一键登录。也可「复制」走剪贴板。"), top(6))
+            addView(row(top = 12) {
+                addView(action("导出账号(JSON)", outlined = true) { exportAccounts() }, weighted())
+                addView(action("导入账号(JSON)", outlined = true) { importAccounts() }, weighted(start = 8))
+            })
+            addView(action("复制账号 JSON 到剪贴板", outlined = true, full = true) { copyAccountsJson() }, top(8))
+        })
+
+        // ---- Qoder 账号 ----
+        addView(section("Qoder 账号"))
+        val qMetas = QoderAuthStore.list(this@MainActivity)
+        val qActive = QoderAuthStore.activeUid(this@MainActivity)
+        if (qMetas.isEmpty()) {
+            addView(card(tone = CardTone.SOFT) {
+                addView(text("未添加 Qoder 账号", FS_CARD_TITLE, true))
+                addView(caption("Qoder 用「个人访问令牌 PAT」登录：在 Qoder 账号集成页创建 pt- 令牌后粘贴到" +
+                    "国内/国际版对应区域。当前仅纳入积分检测 / 换号 / 导出导入，不做聊天转发。"), top(6))
+                addView(action("粘贴 PAT 登录", full = true) { promptQoderPat() }, top(14))
+            })
+        } else {
+            val qActiveMeta = qMetas.firstOrNull { it.uid == qActive }
+            qoderCreditView = text(qoderRemainingLabel(), FS_METRIC, true, "primary")
+            addView(card {
+                addView(row {
+                    addView(text(qActiveMeta?.name?.ifBlank { null } ?: "Qoder 账号", FS_CARD_TITLE, true), weighted())
+                    addView(chipOk("当前使用"))
+                })
+                if (qActiveMeta != null) {
+                    addView(labelValue("UID", qActiveMeta.uid), top(10))
+                    addView(labelValue("区域", if (qActiveMeta.mode == QoderAuthApi.MODE_GLOBAL) "国际版" else "国内版"), top(4))
+                    addView(labelValue("邮箱", qActiveMeta.email.ifBlank { "—" }), top(4))
+                }
+                addView(caption("当前 Qoder 积分余量"), top(10))
+                addView(qoderCreditView!!, top(2))
+            })
+            val qOthers = qMetas.filter { it.uid != qActive }
+            if (qOthers.isNotEmpty()) {
+                addView(section("其它 Qoder 账号（共 ${qMetas.size} 个）"))
+                qOthers.forEach { m ->
+                    addView(card {
+                        addView(row {
+                            addView(text(m.name.ifBlank { m.uid }, FS_BODY, true), weighted())
+                            addView(chipInfo(if (m.mode == QoderAuthApi.MODE_GLOBAL) "国际" else "国内"))
+                        })
+                        addView(caption("UID: ${m.uid}"), top(6))
+                        addView(row(8) {
+                            addView(action("切换到此账号", outlined = true) { switchQoderAccount(m.uid) }, weighted())
+                            addView(action("删除", outlined = true) { confirmRemoveQoder(m) }, weighted(start = 8))
+                        }, top(10))
+                    })
+                }
+            }
+            addView(action("粘贴 PAT 添加 Qoder 账号", outlined = true, full = true) { promptQoderPat() }, top(8))
+        }
+
+        // 登记"监测器要把哪些控件原地刷新"（Qoder 余量 + 自动换号/阈值状态）
+        monitorApply = {
+            qoderCreditView?.text = qoderRemainingLabel()
+            autoSwitchLabel?.text = if (CreditMonitor.isAutoSwitchEnabled(this@MainActivity)) "自动换号：开" else "自动换号：关"
+            thresholdLabel?.text = "换号阈值：≤ ${CreditMonitor.threshold(this@MainActivity)}"
+        }
+    }
+
+    /** Qoder 积分余量数值位：没拉到/无账号显示「—」。 */
+    private fun qoderRemainingLabel(): String =
+        qoderRemaining?.let { "%.1f".format(it) } ?: "—"
+
+    // ------------------------------------------------------------------
+    // Qoder：粘贴 PAT 登录 / 切号 / 删除
+    // ------------------------------------------------------------------
+
+    private fun promptQoderPat() {
+        val edit = EditText(this).apply {
+            hint = "粘贴 Qoder 个人访问令牌 pt-…"
+            isSingleLine = false
+            maxLines = 4
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setTextColor(color("on_surface"))
+            setHintTextColor(color("on_surface_variant"))
+            background = shape("surface_container", RADIUS_CONTROL)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        // 区域选择用一枚开关按钮就地切换（国内/国际），比再来一层弹窗省一步。
+        var mode = QoderAuthApi.MODE_CN
+        val modeRow = row(8) {
+            addView(action("国内版", outlined = true) { mode = QoderAuthApi.MODE_CN; toast("已选：国内版") }, weighted())
+            addView(action("国际版", outlined = true) { mode = QoderAuthApi.MODE_GLOBAL; toast("已选：国际版") }, weighted(start = 8))
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(edit)
+            addView(caption("令牌属于哪个区域？"), top(12))
+            addView(modeRow, top(6))
+        }
+        confirmDialog(
+            title = "粘贴 Qoder PAT 登录",
+            message = "在 Qoder 账号集成页创建个人访问令牌后粘贴。默认按国内版，换区域点上面按钮。",
+            okText = "登录",
+            content = panel,
+        ) {
+            val pat = edit.text?.toString().orEmpty()
+            if (pat.isBlank()) { toast("没有粘贴内容"); return@confirmDialog }
+            toast("正在换取 jobToken…")
+            thread(name = "qoder-pat-login") {
+                val r = runCatching { QoderAuthApi.loginWithPat(this, pat, mode) }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    r.onSuccess { c ->
+                        toast("登录成功：${c.name.ifBlank { c.email.ifBlank { c.uid } }}")
+                        qoderRemaining = null
+                        CreditMonitor.stale = true
+                        render(currentPage)
+                    }.onFailure { e ->
+                        toast("登录失败：${e.message}")
+                        android.util.Log.w("QoderLogin", "PAT 登录失败", e)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun switchQoderAccount(uid: String) {
+        QoderAuthStore.setActive(this, uid)
+        qoderRemaining = null
+        CreditMonitor.stale = true
+        Toast.makeText(this, "已切换到 Qoder ${uid}", Toast.LENGTH_SHORT).show()
+        render(currentPage)
+    }
+
+    private fun confirmRemoveQoder(meta: QoderAuthStore.QMeta) {
+        confirmDialog(
+            title = "删除 Qoder 账号",
+            message = "将删除「${meta.name.ifBlank { meta.uid }}」的本地凭据（含 PAT）。\n不影响 Qoder 服务端账号本身。",
+            okText = "删除",
+            danger = true,
+        ) {
+            QoderAuthStore.remove(this, meta.uid)
+            qoderRemaining = null
+            render(currentPage)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 账号导出 / 导入（JSON）
+    // ------------------------------------------------------------------
+
+    /** 导出：生成备份 JSON → 弹保存框（SAF 写文件）。写失败会 toast，内容不会丢（留在内存直到本次结果返回）。 */
+    private fun exportAccounts() {
+        val json = runCatching { AccountBackup.exportAll(this) }
+            .getOrElse { toast("导出失败：${it.message}"); return }
+        pendingExportJson = json
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/json"
+            putExtra(Intent.EXTRA_TITLE, "traework2api-accounts.json")
+        }
+        runCatching { startActivityForResult(intent, REQ_EXPORT) }
+            .onFailure {
+                // 没有文件选择器时退回剪贴板，至少不空手而归。
+                copyToClipboard("accountBackup", json, "未找到保存对话框，已改为复制到剪贴板")
+                pendingExportJson = null
+            }
+    }
+
+    private fun copyAccountsJson() {
+        val json = runCatching { AccountBackup.exportAll(this) }
+            .getOrElse { toast("导出失败：${it.message}"); return }
+        copyToClipboard("accountBackup", json, "账号 JSON 已复制到剪贴板（含明文 token，请妥善保管）")
+    }
+
+    private fun importAccounts() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        runCatching { startActivityForResult(intent, REQ_IMPORT) }
+            .onFailure { toast("未找到文件选择器；可用剪贴板方式：先复制 JSON，再…") }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        when (requestCode) {
+            REQ_EXPORT -> {
+                val json = pendingExportJson
+                pendingExportJson = null
+                if (json == null) return
+                thread(name = "account-export-write") {
+                    val ok = runCatching {
+                        contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                            ?: error("无法打开输出流")
+                    }
+                    runOnUiThread {
+                        if (ok.isSuccess) toast("已导出账号 JSON")
+                        else toast("导出失败：${ok.exceptionOrNull()?.message}")
+                    }
+                }
+            }
+            REQ_IMPORT -> {
+                thread(name = "account-import-read") {
+                    val text = runCatching {
+                        contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                            ?: error("无法打开输入流")
+                    }
+                    val summary = text.getOrNull()?.let { runCatching { AccountBackup.importAll(this, it) }.getOrNull() }
+                    val err = text.exceptionOrNull() ?: run {
+                        // 读成功但解析失败时给出原因
+                        null
+                    }
+                    runOnUiThread {
+                        when {
+                            summary != null -> {
+                                toast("已导入：Trae ${summary.trae} 个 · Qoder ${summary.qoder} 个")
+                                qoderRemaining = null
+                                accountBalance = null
+                                CreditMonitor.stale = true
+                                render(currentPage)
+                            }
+                            else -> toast("导入失败：JSON 无效或没有可导入的账号${err?.let { "（${it.message}）" } ?: ""}")
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -1609,6 +1885,34 @@ class MainActivity : Activity() {
             }
             runOnUiThread { redraw() }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 有任一账号（Trae 或 Qoder）就把积分监测拉起来，账号页才能"每 2 秒"看到活的积分/自动换号。
+        // 与网关启动时拉起的那次幂等（CreditMonitor.start 内部已挡重复启动）。
+        if (TraeAuthStore.activeUid(this) != null || QoderAuthStore.activeUid(this) != null) {
+            CreditMonitor.start(this)
+        }
+        CreditMonitor.listener = CreditMonitor.Listener { s -> applyMonitorSnapshot(s) }
+        // 进页面先回填上一次快照，避免要等最多 2 秒才出数。
+        CreditMonitor.currentSnapshot()?.let { applyMonitorSnapshot(it) }
+    }
+
+    override fun onPause() {
+        // ⚠️ 必须解绑监听：监测器是**进程级**对象，比 Activity 活得久，
+        // 不清掉会一直持有这个 Activity（内存泄漏），且后台往已销毁的界面回调用会崩。
+        CreditMonitor.listener = null
+        super.onPause()
+    }
+
+    /** 把监测器快照刷进界面（主线程调用，见 CreditMonitor 用 Handler 切了主线程）。 */
+    private fun applyMonitorSnapshot(s: CreditMonitor.Snapshot) {
+        // 手动「刷新」正在转圈时不被后台覆盖，否则「…」和数字会打架。
+        if (!quotaLoading && s.traeBalance != null) accountBalance = s.traeBalance
+        qoderRemaining = s.qoderRemaining
+        quotaApply?.invoke()
+        monitorApply?.invoke()
     }
 
     override fun onDestroy() {
