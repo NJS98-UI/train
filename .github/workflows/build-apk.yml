@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   debug:
-    name: assembleDebug (APK)
+    name: build-apk.ps1 (debug APK)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,9 +27,8 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # GitHub 的 ubuntu-latest 自带 Android SDK，但 compileSdk 36 / build-tools 36.0.0
-      # 可能还没下。best-effort 补装：路径随镜像版本变化，缺失也交给 AGP 自动下载，
-      # 所以这一步失败不阻断（|| true）。
+      # ubuntu-latest ships an Android SDK; compileSdk 36 / build-tools 36.0.0 may be
+      # missing. AGP auto-downloads them, so this step is best-effort only (never fails).
       - name: Ensure Android SDK (android-36 / build-tools 36.0.0)
         continue-on-error: true
         run: |
@@ -46,28 +45,18 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Assemble debug APK
-        run: |
-          chmod +x ./gradlew
-          ./gradlew --no-daemon assembleDebug
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
 
-      - name: Collect APK with version in name
-        id: collect
-        run: |
-          set -e
-          SRC=app/build/outputs/apk/debug/app-debug.apk
-          test -f "$SRC"
-          VER=$(grep -oE 'versionName[[:space:]]*=[[:space:]]*"[^"]+"' app/build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          VER=${VER:-unknown}
-          OUT="artifacts/TraeWork2API-${VER}-debug.apk"
-          mkdir -p artifacts
-          cp "$SRC" "$OUT"
-          echo "apk_path=$OUT" >> "$GITHUB_OUTPUT"
-          echo "Built $OUT ($(du -h "$OUT" | cut -f1))"
+      # Build through build-apk.ps1 (same script used locally). -Online because a cold
+      # CI dependency cache cannot satisfy --offline.
+      - name: Run build-apk.ps1
+        shell: pwsh
+        run: ./build-apk.ps1 -Online
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: TraeWork2API-debug-${{ github.sha }}
-          path: ${{ steps.collect.outputs.apk_path }}
+          path: out/TraeWork2API-*-debug.apk
           if-no-files-found: error
