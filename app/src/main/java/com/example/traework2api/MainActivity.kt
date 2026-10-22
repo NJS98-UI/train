@@ -461,15 +461,27 @@ class MainActivity : Activity() {
                     full = true, outlined = pending == 0) { openKeepAlive() }, top(10))
             }, top(GAP))
         }
-        // 服务地址是本页核心信息：强调卡（有底色、无阴影）+ 等宽主色地址 + 一键复制
+        // 服务地址是本页核心信息：强调卡（有底色、无阴影）+ 等宽主色地址 + 一键复制。
+        // 与官方 v0.4.12 一致：本机 / 局域网两行，base URL 都带 /v1；局域网检测不到就隐藏并给提示。
+        val lanIp = lanAddress()
         addView(card(tone = CardTone.EMPHASIS) {
-            addView(caption("服务地址"))
+            addView(caption("服务地址（本机使用）"))
             addView(row(8) {
-                addView(mono("http://127.0.0.1:${LocalFakeServer.PORT}", FS_BODY, true, "primary"), weighted())
+                addView(mono("http://127.0.0.1:${LocalFakeServer.PORT}/v1", FS_BODY, true, "primary"), weighted())
                 // 卡底本身就是 primary_container，按钮底要换成 surface 才看得见
                 addView(linkAction("复制", overContainer = true) { copyServerUrl() })
             }, top(6))
-            addView(caption("把它作为 base URL 填进任意 OpenAI 兼容客户端"), top(8))
+            addView(caption("局域网其它设备使用"), top(10))
+            if (lanIp != null) {
+                addView(row(8) {
+                    addView(mono("http://$lanIp:${LocalFakeServer.PORT}/v1", FS_BODY, true, "primary"), weighted())
+                    addView(linkAction("复制", overContainer = true) { copyLanUrl(lanIp) })
+                }, top(6))
+                addView(caption("同一 WiFi 下的电脑/平板/手机等设备，base URL 填这一条；API Key 不变，用下面同一个。"), top(8))
+            } else {
+                addView(caption("未检测到局域网 IPv4（未连 WiFi/热点时属正常）；连上 WiFi 后重进本页即可显示。"), top(6))
+            }
+            addView(caption("base URL 填进任意 OpenAI 兼容客户端"), top(8))
         }, top(GAP))
         addView(action(busy ?: if (running) "停止服务" else "启动服务", full = true, outlined = running || busy != null) { toggleService() }
             .apply {
@@ -1602,8 +1614,40 @@ class MainActivity : Activity() {
         copyToClipboard("endpoint", url, "已复制 $url")
     }
 
-    private fun copyServerUrl() =
-        copyToClipboard("serverUrl", "http://127.0.0.1:${LocalFakeServer.PORT}", "已复制服务地址")
+    private fun copyServerUrl() {
+        val url = "http://127.0.0.1:${LocalFakeServer.PORT}/v1"
+        copyToClipboard("serverUrl", url, "已复制 $url")
+    }
+
+    private fun copyLanUrl(lan: String) {
+        val url = "http://$lan:${LocalFakeServer.PORT}/v1"
+        copyToClipboard("lanUrl", url, "已复制 $url")
+    }
+
+    /**
+     * 取本机局域网 IPv4：优先 site-local（10./172.16-31./192.168.），
+     * 没有再退到 link-local（169.254.，DHCP 失败时的地址 —— 官方修复点：别把它误过滤掉）。
+     * hostAddress 可能带 `%wlan0` scope 后缀，会污染 URL，一律剥掉。检测不到返回 null。
+     */
+    private fun lanAddress(): String? {
+        return try {
+            var linkLocal: String? = null
+            val ifs = java.net.NetworkInterface.getNetworkInterfaces()
+            while (ifs.hasMoreElements()) {
+                val nif = ifs.nextElement()
+                if (!nif.isUp || nif.isLoopback) continue
+                val addrs = nif.inetAddresses
+                while (addrs.hasMoreElements()) {
+                    val a = addrs.nextElement()
+                    if (a !is java.net.Inet4Address || a.isLoopbackAddress) continue
+                    val host = a.hostAddress?.substringBefore('%') ?: continue
+                    if (a.isSiteLocalAddress) return host
+                    if (host.startsWith("169.254.") && linkLocal == null) linkLocal = host
+                }
+            }
+            linkLocal
+        } catch (_: Exception) { null }
+    }
 
     /**
      * 版权信息行：`标签 | 值`，标签列与「版本」等 labelValue 统一走 `minWidth 96dp`，
