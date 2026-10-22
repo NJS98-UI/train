@@ -171,7 +171,7 @@ object QoderAuthApi {
         val cred = QoderAuthStore.load(context) ?: return null
         val now = System.currentTimeMillis()
         if (cred.jobToken.isNotBlank() && now + skewMillis < cred.expiresAt) return cred.jobToken
-        val renewed: JobToken? = runCatching {
+        val renewed: JobToken = runCatching {
             if (cred.jobRefreshToken.isNotBlank()) refreshJobToken(cred.jobRefreshToken, cred.mode)
             else if (cred.pat.isNotBlank()) exchangeJobToken(cred.pat, cred.mode)
             else null

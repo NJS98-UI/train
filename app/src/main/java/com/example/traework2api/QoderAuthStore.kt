@@ -239,15 +239,17 @@ object QoderAuthStore {
         return Base64.encodeToString(cipher.iv, Base64.NO_WRAP) + SEP + Base64.encodeToString(ct, Base64.NO_WRAP)
     }
 
-    private fun decrypt(b64: String): String? = try {
-        val parts = b64.split(SEP)
-        if (parts.size != 2) return null
-        val iv = Base64.decode(parts[0], Base64.NO_WRAP)
-        val ct = Base64.decode(parts[1], Base64.NO_WRAP)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, iv))
-        String(cipher.doFinal(ct), StandardCharsets.UTF_8)
-    } catch (_: Exception) { null }
+    private fun decrypt(b64: String): String? {
+        return try {
+            val parts = b64.split(SEP)
+            if (parts.size != 2) return null
+            val iv = Base64.decode(parts[0], Base64.NO_WRAP)
+            val ct = Base64.decode(parts[1], Base64.NO_WRAP)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, iv))
+            String(cipher.doFinal(ct), StandardCharsets.UTF_8)
+        } catch (_: Exception) { null }
+    }
 
     /** 纯计算自检：索引 JSON 往返无损（uid 是主键）。 */
     fun selfCheck() {
