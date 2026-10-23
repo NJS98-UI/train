@@ -1,6 +1,7 @@
 package com.example.traework2api
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -30,6 +31,10 @@ object QoderAuthApi {
     private const val EP_REFRESH = "/api/v1/jobToken/refresh"
     private const val EP_USERINFO = "/api/v1/userinfo"
     private const val EP_USAGE = "/api/v2/quota/usage"
+
+    // 每日可领 Credits（campaigns）。来自多个独立社区实现交叉印证：
+    // 列表 GET /sash/api/v1/me/campaigns?forceRefresh=true；领取 POST .../campaigns/{id}/claim（body {}，幂等）。
+    private const val EP_CAMPAIGNS = "/sash/api/v1/me/campaigns"
 
     private const val JSON = "application/json"
 
@@ -169,6 +174,14 @@ object QoderAuthApi {
      */
     fun validJobToken(context: Context, skewMillis: Long): String? {
         val cred = QoderAuthStore.load(context) ?: return null
+        return validJobTokenFor(context, cred, skewMillis)
+    }
+
+    /**
+     * 为**指定账号**取一个有效 jobToken（不改变当前选中账号）：临期先用 jrt 续、续不动再用 PAT 重新换，写回库。
+     * 供批量领取 / 换号探测用（[QoderAuthStore.updateTokens] 只写 token，绝不 setActive）。
+     */
+    fun validJobTokenFor(context: Context, cred: QoderAuthStore.QCred, skewMillis: Long): String? {
         val now = System.currentTimeMillis()
         if (cred.jobToken.isNotBlank() && now + skewMillis < cred.expiresAt) return cred.jobToken
         val renewed: JobToken = runCatching {
@@ -184,6 +197,169 @@ object QoderAuthApi {
         return renewed.token
     }
 
+    // ------------------------------------------------------------------
+    // 每日可领 Credits（campaigns list + claim）
+    // ------------------------------------------------------------------
+
+    /** 单条活动（campaign）关键字段。startAt/endAt 是 unix **秒**（不是毫秒，社区踩过的坑）。 */
+    data class QCampaign(
+        val id: String,
+        val claimStatus: String,   // CLAIMABLE | CLAIMED | ...
+        val actionType: String,    // CLAIM_BENEFIT | ...
+        val benefitKind: String,   // CREDITS | ...
+        val benefitAmount: Long,
+    ) {
+        val claimable: Boolean
+            get() = id.isNotBlank() &&
+                claimStatus.equals("CLAIMABLE", true) &&
+                actionType.equals("CLAIM_BENEFIT", true)
+    }
+
+    /** 领取结果。status ∈ ok / already / none / unsupported / fail。 */
+    data class QClaimResult(val status: String, val amount: Long, val message: String) {
+        val ok: Boolean get() = status == "ok"
+    }
+
+    /** GET 带 Bearer，可选携带设备 umid 头（国际版 campaigns 需要）。 */
+    private fun getForCampaigns(url: String, bearer: String, umid: String?): String {
+        val req = Request.Builder().url(url).get()
+            .header("Authorization", "Bearer $bearer")
+            .header("Accept", JSON)
+            .header("User-Agent", "traework2api")
+            .header("Cosy-Version", "1.0.1")
+            .header("Cosy-ClientType", "5")
+            .apply { if (umid != null) header("umid", umid) }
+            .build()
+        client.newCall(req).execute().use { r ->
+            val text = r.body?.string().orEmpty()
+            if (!r.isSuccessful) throw java.io.IOException("Qoder ${r.code}: ${text.take(200)}")
+            return text
+        }
+    }
+
+    /** POST 带 Bearer + JSON body（claim 用，body 传空对象）。 */
+    private fun postBearer(url: String, bearer: String, body: JSONObject, umid: String?): String {
+        val req = Request.Builder().url(url)
+            .post(body.toString().toRequestBody(JSON.toMediaType()))
+            .header("Authorization", "Bearer $bearer")
+            .header("Content-Type", JSON)
+            .header("Accept", JSON)
+            .header("User-Agent", "traework2api")
+            .header("Cosy-Version", "1.0.1")
+            .header("Cosy-ClientType", "5")
+            .apply { if (umid != null) header("umid", umid) }
+            .build()
+        client.newCall(req).execute().use { r ->
+            val text = r.body?.string().orEmpty()
+            if (!r.isSuccessful) throw java.io.IOException("Qoder ${r.code}: ${text.take(200)}")
+            return text
+        }
+    }
+
+    /** 国际版 campaigns 需要客户端设备标识 umid。按 uid 确定性派生（同账号恒定、不同账号不撞）。 */
+    private fun umidFor(uid: String): String {
+        val seed = "qoder-umid:" + uid
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(seed.toByteArray())
+        return Base64.encodeToString(digest.copyOf(16), Base64.NO_WRAP or Base64.NO_PADDING)
+            .trim().replace("+", "-").replace("/", "_")
+    }
+
+    /** 拉取活动列表（可领的在里面）。解析见 [parseCampaigns]。 */
+    private fun fetchCampaigns(jt: String, mode: String, uid: String): List<QCampaign> {
+        val umid = if (mode == MODE_GLOBAL) umidFor(uid) else null
+        val url = openApiBase(mode) + EP_CAMPAIGNS + "?forceRefresh=true"
+        val text = getForCampaigns(url, jt, umid)
+        return parseCampaigns(JSONObject(text))
+    }
+
+    /** 领一条活动。body 固定 {}（幂等）。返回本次入账额度（replayed 时为 0）。 */
+    private fun claimOne(jt: String, mode: String, uid: String, campaignId: String): Pair<Boolean, Long> {
+        val umid = if (mode == MODE_GLOBAL) umidFor(uid) else null
+        val url = openApiBase(mode) + EP_CAMPAIGNS + "/" + campaignId + "/claim"
+        val text = postBearer(url, jt, JSONObject(), umid)
+        return parseClaim(JSONObject(text))
+    }
+
+    /** 抽出来单独成函数是为了能自检（list/claim 都要打网络）。 */
+    internal fun parseCampaigns(root: JSONObject): List<QCampaign> {
+        val arr = root.optJSONArray("campaigns") ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val id = o.optString("campaignId", o.optString("id", ""))
+            if (id.isBlank()) return@mapNotNull null
+            val b = o.optJSONObject("benefit")
+            QCampaign(
+                id = id,
+                claimStatus = o.optString("claimStatus", ""),
+                actionType = o.optString("actionType", ""),
+                benefitKind = b?.optString("kind", "") ?: "",
+                benefitAmount = b?.optLong("amount", 0L) ?: 0L,
+            )
+        }
+    }
+
+    /** claim 响应：返回 (是否真的新领到, 本次入账额度)。replayed=true 表示今天已领过，不算新领。 */
+    internal fun parseClaim(root: JSONObject): Pair<Boolean, Long> {
+        val status = root.optString("status", "")
+        val replayed = root.optBoolean("replayed", false)
+        val amount = root.optJSONObject("benefit")?.optLong("amount", 0L) ?: 0L
+        val claimed = status.equals("CLAIMED", true)
+        return (claimed && !replayed) to if (claimed && !replayed) amount else 0L
+    }
+
+    /** 对指定 uid 领取当前可领的每日 Credits。无有效 token 抛异常。 */
+    fun claimDailyForUid(context: Context, uid: String): QClaimResult {
+        val cred = QoderAuthStore.loadByUid(context, uid)
+            ?: return QClaimResult("fail", 0, "凭据读取失败")
+        return claimDailyForCred(context, cred)
+    }
+
+    /** 领取编排：取有效 jt → 列活动 → 领 CLAIMABLE 的 → 汇总。失败不抛（一人失败不拖垮整批）。 */
+    private fun claimDailyForCred(context: Context, cred: QoderAuthStore.QCred): QClaimResult {
+        val jt = validJobTokenFor(context, cred, skewMillis = 60_000L)
+        if (jt.isNullOrBlank()) return QClaimResult("fail", 0, "没有有效 token，请重新粘贴 PAT 登录")
+        val campaigns = try {
+            fetchCampaigns(jt, cred.mode, cred.uid)
+        } catch (e: java.io.IOException) {
+            // 国际版列表若缺 umid 会 4xx；区分区域给出人话
+            return if (cred.mode == MODE_GLOBAL)
+                QClaimResult("unsupported", 0, "国际版活动接口未返回（可能需要真实设备标识）：${e.message}")
+            else QClaimResult("fail", 0, "拉取活动失败：${e.message ?: e.javaClass.simpleName}")
+        } catch (e: Exception) {
+            return QClaimResult("fail", 0, "拉取活动失败：${e.javaClass.simpleName}")
+        }
+        val claimable = campaigns.filter { it.claimable }
+        if (claimable.isEmpty())
+            return QClaimResult("already", 0, "今日无可领活动（可能已领或未到活动时段）")
+        var total = 0L
+        var fresh = 0
+        var lastErr: String? = null
+        for (c in claimable) {
+            try {
+                val (newly, amt) = claimOne(jt, cred.mode, cred.uid, c.id)
+                if (newly) { total += amt; fresh++ }
+            } catch (e: Exception) {
+                lastErr = e.message ?: e.javaClass.simpleName
+            }
+        }
+        return if (fresh > 0) QClaimResult("ok", total, "")
+        else QClaimResult("already", 0, lastErr?.let { "领取未生效：$it" } ?: "今日已领取")
+    }
+
+    /**
+     * 对**全部**已保存 Qoder 账号逐一带领每日 Credits。**阻塞** —— 必须在后台线程跑。
+     * 账号间留间隔（上游按设备/账号维度风控）。返回 (uid → 结果) 供 UI 汇总。
+     */
+    fun claimDailyAll(context: Context): List<Pair<String, QClaimResult>> {
+        val out = ArrayList<Pair<String, QClaimResult>>()
+        for ((i, m) in QoderAuthStore.list(context).withIndex()) {
+            if (i > 0) Thread.sleep(600L)
+            out.add(m.uid to runCatching { claimDailyForUid(context, m.uid) }
+                .getOrElse { QClaimResult("fail", 0, it.message ?: it.javaClass.simpleName) })
+        }
+        return out
+    }
+
     /** 纯计算自检：host 分派与积分余量判据。 */
     fun selfCheck() {
         val cn = openApiBase(MODE_CN)
@@ -194,5 +370,32 @@ object QoderAuthApi {
         check(QCredits(50.0, false).hasCredit) { "自检失败：有剩余额度应判 hasCredit" }
         check(!QCredits(0.0, false).hasCredit) { "自检失败：零额度不应 hasCredit" }
         check(!QCredits(50.0, true).hasCredit) { "自检失败：isQuotaExceeded 应判无额度" }
+
+        // campaigns host 必须带 /sash 前缀（与 usage 的 /api/v2 不同链路）。
+        check((openApiBase(MODE_CN) + EP_CAMPAIGNS).contains("/sash/api/v1/me/campaigns")) {
+            "自检失败：Qoder campaigns 端点路径不符"
+        }
+
+        // 活动解析：只有 CLAIMABLE ∧ CLAIM_BENEFIT 才算可领（判松了会白发 claim，判严了漏领）。
+        val camps = parseCampaigns(JSONObject("""{"campaigns":[
+            {"campaignId":"act-1","claimStatus":"CLAIMABLE","actionType":"CLAIM_BENEFIT","benefit":{"kind":"CREDITS","amount":100}},
+            {"id":"act-2","claimStatus":"CLAIMED","actionType":"CLAIM_BENEFIT","benefit":{"kind":"CREDITS","amount":100}},
+            {"campaignId":"","claimStatus":"CLAIMABLE","actionType":"CLAIM_BENEFIT"},
+            {"campaignId":"act-4","claimStatus":"CLAIMABLE","actionType":"OTHER"}
+        ]}"""))
+        check(camps.size == 4) { "自检失败：应解析 4 条活动（含空 id）" }
+        check(camps[0].claimable) { "自检失败：CLAIMABLE+CLAIM_BENEFIT 应判可领" }
+        check(!camps[1].claimable) { "自检失败：已领(CLAIMED)不应判可领" }
+        check(!camps[2].claimable) { "自检失败：空 id 不应判可领" }
+        check(!camps[3].claimable) { "自检失败：非 CLAIM_BENEFIT 不应判可领" }
+
+        // claim 解析：replayed=true（今天已领过）不算新领、不计额度，避免重复计数。
+        check(parseClaim(JSONObject("""{"status":"CLAIMED","replayed":false,"benefit":{"kind":"CREDITS","amount":100}}""")) == (true to 100L)) {
+            "自检失败：新领应计成功并累加额度"
+        }
+        check(parseClaim(JSONObject("""{"status":"CLAIMED","replayed":true,"benefit":{"kind":"CREDITS","amount":100}}""")) == (false to 0L)) {
+            "自检失败：replayed 不应算新领"
+        }
+        check(parseClaim(JSONObject("""{}""")).first.not()) { "自检失败：缺字段不应判成功" }
     }
 }

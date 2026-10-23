@@ -156,6 +156,8 @@ class MainActivity : Activity() {
     private var pendingExportJson: String? = null
     /** 当前 Qoder 账号积分余量（监测器回填，仅展示）。null=未拉到/无账号。 */
     private var qoderRemaining: Double? = null
+    /** Qoder 每日 Credits 领取进行中（手动，挡住重复点击）。 */
+    private var qoderClaimBusy = false
     /** 「积分与用量」/「Qoder 账号」卡里会被监测器原地刷新的控件。 */
     private var monitorApply: (() -> Unit)? = null
     /**
@@ -718,6 +720,9 @@ class MainActivity : Activity() {
                 }
                 addView(caption("当前 Qoder 积分余量"), top(10))
                 addView(qoderCreditView!!, top(2))
+                // 每日可领 Credits（campaigns/claim）：领到的直接进入账号额度，随后由积分监测反映。
+                addView(caption("每日可领 Credits（Qoder「每天领 Credits」活动）"), top(12))
+                addView(action(qoderClaimLabel(), full = true) { claimQoderDaily() }, top(6))
             })
             val qOthers = qMetas.filter { it.uid != qActive }
             if (qOthers.isNotEmpty()) {
@@ -736,6 +741,7 @@ class MainActivity : Activity() {
                     })
                 }
             }
+            addView(action(qoderBatchClaimLabel(), outlined = true, full = true) { claimQoderDailyAll() }, top(8))
             addView(action("粘贴 PAT 添加 Qoder 账号", outlined = true, full = true) { promptQoderPat() }, top(8))
         }
 
@@ -824,6 +830,68 @@ class MainActivity : Activity() {
             qoderRemaining = null
             render(currentPage)
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Qoder：领取每日 Credits（campaigns/claim）
+    // ------------------------------------------------------------------
+
+    private fun qoderClaimLabel(): String = if (qoderClaimBusy) "领取中…" else "领取每日 Credits"
+    private fun qoderBatchClaimLabel(): String =
+        if (qoderClaimBusy) "领取中…" else "一键领取全部账号每日 Credits"
+
+    /** 领取当前账号。阻塞操作在后台线程；成功后清余量并让监测器重查。 */
+    private fun claimQoderDaily() {
+        if (qoderClaimBusy) return
+        val uid = QoderAuthStore.activeUid(this) ?: run { toast("没有 Qoder 账号"); return }
+        qoderClaimBusy = true
+        render(currentPage)
+        thread(name = "qoder-claim") {
+            val r = runCatching { QoderAuthApi.claimDailyForUid(this@MainActivity, uid) }
+            runOnUiThread {
+                qoderClaimBusy = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                r.onSuccess { toast(qoderClaimToast(it)) }
+                    .onFailure { e -> toast("领取失败：${e.message}") }
+                qoderRemaining = null
+                CreditMonitor.stale = true
+                render(currentPage)
+            }
+        }
+    }
+
+    /** 领取全部账号。 */
+    private fun claimQoderDailyAll() {
+        if (qoderClaimBusy) return
+        if (QoderAuthStore.list(this).isEmpty()) { toast("没有 Qoder 账号"); return }
+        qoderClaimBusy = true
+        render(currentPage)
+        thread(name = "qoder-claim-all") {
+            val items = QoderAuthApi.claimDailyAll(this@MainActivity)
+            runOnUiThread {
+                qoderClaimBusy = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                toast(qoderBatchClaimToast(items))
+                qoderRemaining = null
+                CreditMonitor.stale = true
+                render(currentPage)
+            }
+        }
+    }
+
+    private fun qoderClaimToast(r: QoderAuthApi.QClaimResult): String = when (r.status) {
+        "ok" -> "领取成功 +${r.amount} Credits"
+        "already" -> r.message.ifBlank { "今日已领取" }
+        "unsupported" -> "国际版暂不支持自动领取：${r.message}"
+        else -> "领取失败：${r.message}"
+    }
+
+    private fun qoderBatchClaimToast(items: List<Pair<String, QoderAuthApi.QClaimResult>>): String {
+        if (items.isEmpty()) return "没有 Qoder 账号"
+        val ok = items.filter { it.second.status == "ok" }
+        if (ok.isEmpty()) return "无可领额度（已领或不符）· 共 ${items.size} 个账号"
+        val total = ok.sumOf { it.second.amount }
+        return "${ok.size}/${items.size} 个账号领取成功，共 +$total Credits"
     }
 
     // ------------------------------------------------------------------
