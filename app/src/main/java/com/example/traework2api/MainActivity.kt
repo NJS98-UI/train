@@ -158,6 +158,8 @@ class MainActivity : Activity() {
     private var qoderRemaining: Double? = null
     /** Qoder 每日 Credits 领取进行中（手动，挡住重复点击）。 */
     private var qoderClaimBusy = false
+    /** 本次进程是否已尝试过定时补签（避免每次回前台重复打上游；今天领没领由 maybeCatchUp 内部判定）。 */
+    private var qoderCatchUpTried = false
     /** 「积分与用量」/「Qoder 账号」卡里会被监测器原地刷新的控件。 */
     private var monitorApply: (() -> Unit)? = null
     /**
@@ -213,6 +215,8 @@ class MainActivity : Activity() {
         // Qoder 账号索引 + OpenAPI 端点 + 积分判据自检（uid 串了会换错号）。
         QoderAuthStore.selfCheck()
         QoderAuthApi.selfCheck()
+        // Qoder 定时领取：结果往返/去重聚合自检。
+        QoderCheckin.selfCheck()
         // 备份文件（Trae+Qoder 合并）格式识别自检：认错了会把 Trae 备份喂给 Qoder 解析。
         AccountBackup.selfCheck()
         // 积分监测换号阈值边界自检。
@@ -742,6 +746,40 @@ class MainActivity : Activity() {
                 }
             }
             addView(action(qoderBatchClaimLabel(), outlined = true, full = true) { claimQoderDailyAll() }, top(8))
+
+            // ---- 每日定时领取（闹钟 + 进 App 补签）----
+            addView(card {
+                addView(text("每日定时领取", FS_CARD_TITLE, true))
+                addView(caption("到点自动为全部 Qoder 账号领每日 Credits；进 App 会补签" +
+                    "（无开机自启，重启后打开一次即补）。默认关闭。"), top(6))
+                val on = QoderCheckin.isEnabled(this@MainActivity)
+                val schedLabel = linkAction(if (on) "定时领取：开" else "定时领取：关") {
+                    if (QoderCheckin.isEnabled(this@MainActivity)) {
+                        QoderCheckin.disable(this@MainActivity); toast("已关闭 Qoder 定时领取")
+                    } else {
+                        QoderCheckin.enable(this@MainActivity, QoderCheckin.timeText(this@MainActivity))
+                        toast("已开启，每天 ${QoderCheckin.timeText(this@MainActivity)}")
+                    }
+                    render(currentPage)
+                }
+                val timeLabel = linkAction("时刻 ${QoderCheckin.timeText(this@MainActivity)}") {
+                    val next = nextQoderTime(QoderCheckin.timeText(this@MainActivity))
+                    if (QoderCheckin.isEnabled(this@MainActivity))
+                        QoderCheckin.enable(this@MainActivity, next)
+                    else QoderCheckin.setTime(this@MainActivity, next)
+                    render(currentPage)
+                }
+                addView(row(12) {
+                    addView(schedLabel, weighted())
+                    addView(timeLabel, weighted(start = 8))
+                })
+                val last = QoderCheckin.lastResults(this@MainActivity)
+                if (last != null) {
+                    addView(caption("上次 ${last.date}：" +
+                        last.results.joinToString("；") { QoderCheckin.statusLabel(it) }), top(10))
+                }
+            }, top(8))
+
             addView(action("粘贴 PAT 添加 Qoder 账号", outlined = true, full = true) { promptQoderPat() }, top(8))
         }
 
@@ -847,7 +885,18 @@ class MainActivity : Activity() {
         qoderClaimBusy = true
         render(currentPage)
         thread(name = "qoder-claim") {
+            // 与定时/补签共用 busy：同一账号 token 轮换，并发续期会互相作废。
+            if (!QoderCheckin.busy.compareAndSet(false, true)) {
+                runOnUiThread {
+                    qoderClaimBusy = false
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    toast("定时/补签正在进行，稍后再试")
+                    render(currentPage)
+                }
+                return@thread
+            }
             val r = runCatching { QoderAuthApi.claimDailyForUid(this@MainActivity, uid) }
+            QoderCheckin.busy.set(false)
             runOnUiThread {
                 qoderClaimBusy = false
                 if (isFinishing || isDestroyed) return@runOnUiThread
@@ -867,7 +916,17 @@ class MainActivity : Activity() {
         qoderClaimBusy = true
         render(currentPage)
         thread(name = "qoder-claim-all") {
+            if (!QoderCheckin.busy.compareAndSet(false, true)) {
+                runOnUiThread {
+                    qoderClaimBusy = false
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    toast("定时/补签正在进行，稍后再试")
+                    render(currentPage)
+                }
+                return@thread
+            }
             val items = QoderAuthApi.claimDailyAll(this@MainActivity)
+            QoderCheckin.busy.set(false)
             runOnUiThread {
                 qoderClaimBusy = false
                 if (isFinishing || isDestroyed) return@runOnUiThread
@@ -892,6 +951,13 @@ class MainActivity : Activity() {
         if (ok.isEmpty()) return "无可领额度（已领或不符）· 共 ${items.size} 个账号"
         val total = ok.sumOf { it.second.amount }
         return "${ok.size}/${items.size} 个账号领取成功，共 +$total Credits"
+    }
+
+    /** 定时时刻在常用档位间循环（免输入框，够用即可）。 */
+    private fun nextQoderTime(cur: String): String {
+        val slots = listOf("08:00", "09:00", "12:00", "20:00", "22:00")
+        val i = slots.indexOf(cur)
+        return slots[if (i < 0) 0 else (i + 1) % slots.size]
     }
 
     // ------------------------------------------------------------------
@@ -2009,6 +2075,20 @@ class MainActivity : Activity() {
         CreditMonitor.listener = CreditMonitor.Listener { s -> applyMonitorSnapshot(s) }
         // 进页面先回填上一次快照，避免要等最多 2 秒才出数。
         CreditMonitor.currentSnapshot()?.let { applyMonitorSnapshot(it) }
+        // Qoder 定时补签：开关开着但闹钟没跑成（进程被杀/重启无 BOOT 自启）时，进 App 补领一轮。
+        // 每次进程只尝试一次；今天是否真跑由 maybeCatchUp 内部按 last_run_date/allOk 判定。
+        if (!qoderCatchUpTried && QoderCheckin.isEnabled(this) && QoderAuthStore.activeUid(this) != null) {
+            qoderCatchUpTried = true
+            thread(name = "qoder-catchup") {
+                val ran = runCatching { QoderCheckin.maybeCatchUp(this) }.getOrDefault(false)
+                if (ran) runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    qoderRemaining = null
+                    CreditMonitor.stale = true
+                    render(currentPage)
+                }
+            }
+        }
     }
 
     override fun onPause() {
