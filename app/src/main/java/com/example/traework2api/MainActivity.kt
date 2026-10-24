@@ -888,7 +888,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             addView(hourPicker, lp(0, -2).also { it.weight = 1f })
-            addView(text(":", FS_TITLE, true), lp(-2, -2, start = 6, end = 6))
+            addView(text(":", FS_CARD_TITLE, true), lp(-2, -2, start = 6, end = 6))
             addView(minPicker, lp(0, -2).also { it.weight = 1f })
         }
         confirmDialog(
