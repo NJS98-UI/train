@@ -8,6 +8,45 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.4.15] - 2026-10-17
+
+### Added
+- `QoderModelCache.kt`（新）：**解密 Qoder CLI 的模型目录缓存** `catalog-v7` / `catalog-v6`。
+  - 信封：`base64("QMC\x01" || nonce[12] || AES-256-GCM(plain) || tag[16])`，
+    key = `HKDF-SHA256(ikm=uid, salt="qoder-model-cache-enc", info="model-cache-v1", 32)`。
+  - 用户只需把文件内容整段粘贴，App 用当前账号 uid 解密 —— 不用自己解。
+  - 也接受**明文目录 JSON**（自动识别：以 `{`/`[` 开头就按明文）。
+  - `selfCheck()` 钉住 RFC 5869 的 HKDF 测试向量（防止 extract/expand 写反）、
+    加密→解密往返、**换 uid 必须解不开**（GCM 认证）、各种坏信封返回 null 不抛。
+- 模型页（Qoder 后端）新增「官方模型目录」卡：
+  「同步官方目录」/「导入 catalog-v7（CLI 缓存）」/「查看上次拉取的原文（排查用）」。
+- `QoderAuthApi.lastCatalogRaw`：记住上次目录请求的**响应原文**（解析失败也留），
+  用户说"对不上"时能直接看到上游回了什么，不用靠猜。
+- `QModel.aliases`：官方改名后旧名字仍可解析（`Kimi-K3` → `kmodel_latest` 等）。
+- `QModel.unverified`：key 是**推断**的模型打标记，卡片显示「key 未验证」。
+
+### Changed
+- **内置模型清单按官方 APP 实际清单重写**（16 → 19 条），名称与倍率都换成官方的：
+  - `Auto 0.5x`、`极致 0.8x`、`快速`、`经济`、`Cantus 4.0x`、`Qwen3.8-Max 2 0.5x`、
+    `Kimi-K3.1-Pro 1.0x`、`Kimi-K2.8-Preview 0.8x`、`GLM-5.3 0.8x`、
+    `DeepSeek-V4-Pro 0.5x`、`DeepSeek-Flash 0.0x`、`MiniMax-M3.1-Flash 0.1x`
+  - 新增（key 按命名规律推断，标记 unverified）：`Sonus 8.0x`、`Qwen3.8-Flash 0.0x`、`GLM-5.3-Flash 0.1x`
+  - 保留旧 key（官方 UI 已不显示但请求仍可能有效）：`lite`、`Qwen3.7-Max`、`Qwen3.7-Plus`、`GLM-5.2`
+- `QModel.priceFactor` 改为 **可空**：`null` = 不知道（官方 UI 上「快速/经济」没标倍率）。
+  未知时卡片显示「倍率未知」，`/v1/models` 里**不写** `price_factor` 字段 ——
+  瞎填 1.0 会让人以为免费模型也扣费。
+- `QoderUpstream.model_config`：倍率未知时按 1.0 发（参考实现一直发 1.0 且可用），已知则发官方真实值。
+
+### Notes
+- **之前"0 倍率模型加载不出来"的真因**：内置清单是从参考实现抄的**旧快照**，
+  官方新增的免费模型根本不在里面，而且倍率全写死 1.0。
+  现在三条路：官方目录接口 → CLI 缓存导入 → 内置清单兜底。
+- **为什么还需要导入**：官方 UI 上的名字只是展示名，请求要的是 key；
+  `Qwen3.8-Flash` 的 key 是 `qmodel_38flash` 还是 `qmodel_flash`，没有公开映射表。
+  猜错就是上游 400，所以三个新模型的 key 标了 `unverified`，导入真目录后标记自动消失。
+- 官方目录接口只用未鉴权探测确认过**路由存在**（`/api/v1/models` 返回 401），
+  响应体形状未实测 —— 所以解析器写成容错扫描 + 原文留存 + CLI 缓存兜底。
+
 ## [0.4.14] - 2026-10-17
 
 ### Added

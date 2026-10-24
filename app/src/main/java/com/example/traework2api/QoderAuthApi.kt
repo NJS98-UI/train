@@ -52,6 +52,16 @@ object QoderAuthApi {
     var lastCatalogError: String? = null
         private set
 
+    /**
+     * 最近一次模型目录请求**拿到的响应原文**（哪怕解析失败也留着）。
+     *
+     * 用途：用户说"拉出来的对不上"时，得能看见上游到底回了什么 ——
+     * 没有原文就只能瞎猜是接口路径错、鉴权错还是字段名变了。
+     */
+    @Volatile
+    var lastCatalogRaw: String? = null
+        private set
+
     private const val JSON = "application/json"
 
     private val client = OkHttpClient.Builder()
@@ -118,6 +128,7 @@ object QoderAuthApi {
             return null
         }
         lastCatalogError = null
+        lastCatalogRaw = null
         val base = openApiBase(mode)
         val fails = ArrayList<String>()
         for (path in listOf(EP_MODELS, EP_MODEL_LIST)) {
@@ -129,6 +140,7 @@ object QoderAuthApi {
                     Log.w(TAG, "模型目录 $method $path 异常: ${e.javaClass.simpleName}")
                     null
                 } ?: continue
+                if (lastCatalogRaw == null) lastCatalogRaw = text
                 if (QoderModelCatalog.parseCatalogJson(text).isNotEmpty()) {
                     Log.i(TAG, "模型目录已拉取（$method $path，${text.length} 字节）")
                     return text

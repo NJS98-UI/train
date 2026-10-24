@@ -145,7 +145,8 @@ object QoderUpstream {
         .put("is_reasoning", m.reasoning)
         // 用**官方标注的真实倍率**（来自上游目录），不要写死 1.0：
         // 写死会让上游按错误倍率计费/路由，也让免费模型看起来像收费。
-        .put("price_factor", m.priceFactor)
+        // 未知倍率按 1.0 发（参考实现一直发 1.0 且可用）；已知则发官方真实值。
+        .put("price_factor", m.priceFactor ?: 1.0)
 
     /** 采样参数。缺省 max_tokens 用 32000（与参考实现一致，不是无限）。 */
     private fun parameters(src: JSONObject): JSONObject {

@@ -36,18 +36,30 @@ object QoderModelCatalog {
         val name: String,         // 展示名（也是客户端可用别名）
         val contextLength: Int,
         val reasoning: Boolean,   // 是否为推理模型（支持 reasoning_effort）
-        /** 官方标注的**倍率**（`price_factor`）。0.0 = 免费。缺省按 1.0（中性，不夸大成免费）。 */
-        val priceFactor: Double = 1.0,
+        /**
+         * 官方标注的**倍率**（`price_factor`）。`0.0` = 免费，`null` = **不知道**。
+         *
+         * 为什么允许 null：官方 UI 上「快速 / 经济」这类档位没显示倍率，
+         * 而瞎填 1.0 会让人以为免费模型也扣费 —— 显示「倍率未知」才是诚实的。
+         */
+        val priceFactor: Double? = null,
+        /** 旧展示名（客户端可能还在用旧名字请求，得能认）。 */
+        val aliases: List<String> = emptyList(),
+        /**
+         * key 是**推断**出来的、未经官方目录验证。
+         * 官方新模型的 key 没有公开映射表，只能按命名规律猜；猜错上游会报错。
+         * 用官方目录（[QoderModelCache] 导入 / 上游同步）覆盖后该标记自然消失。
+         */
+        val unverified: Boolean = false,
     ) {
         /** 免费模型（官方倍率 0）。 */
-        val free: Boolean get() = priceFactor <= 0.0
+        val free: Boolean get() = priceFactor != null && priceFactor <= 0.0
 
-        /** 倍率展示文本：`0` / `1.0` / `2.5`（去掉无意义的小数尾巴）。 */
+        /** 倍率展示文本：`0` / `1` / `2.5` / `?`（未知，去掉无意义的小数尾巴）。 */
         val priceLabel: String
-            get() = if (priceFactor == priceFactor.toLong().toDouble()) {
-                priceFactor.toLong().toString()
-            } else {
-                priceFactor.toString()
+            get() {
+                val v = priceFactor ?: return "?"
+                return if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
             }
     }
 
@@ -57,22 +69,30 @@ object QoderModelCatalog {
      * 参考实现自己也没有真实倍率，真实倍率靠 [setDynamic] 从上游目录覆盖）。
      */
     val BUILTIN: List<QModel> = listOf(
-        QModel("auto", "Auto", 180_000, false),
-        QModel("ultimate", "Ultimate", 1_000_000, true),
-        QModel("performance", "Performance", 1_000_000, false),
-        QModel("efficient", "Efficient", 180_000, false),
+        // ---- 官方 UI 上确认存在、key 也确定的 ----
+        QModel("auto", "Auto", 180_000, false, 0.5),
+        QModel("ultimate", "极致", 1_000_000, true, 0.8, aliases = listOf("Ultimate")),
+        QModel("performance", "快速", 1_000_000, false, null, aliases = listOf("Performance")),
+        QModel("efficient", "经济", 180_000, false, null, aliases = listOf("Efficient")),
+        QModel("cmodel", "Cantus", 1_000_000, true, 4.0),
+        QModel("qmodel_38max", "Qwen3.8-Max 2", 1_000_000, true, 0.5, aliases = listOf("Qwen3.8-Max")),
+        QModel("kmodel_latest", "Kimi-K3.1-Pro", 1_000_000, false, 1.0, aliases = listOf("Kimi-K3")),
+        QModel("kmodel", "Kimi-K2.8-Preview", 256_000, false, 0.8, aliases = listOf("Kimi-K2.7-Code")),
+        QModel("gmodel", "GLM-5.3", 1_000_000, true, 0.8),
+        QModel("dmodel", "DeepSeek-V4-Pro", 1_000_000, true, 0.5),
+        QModel("dfmodel", "DeepSeek-Flash", 1_000_000, true, 0.0, aliases = listOf("DeepSeek-V4-Flash")),
+        QModel("mmodel", "MiniMax-M3.1-Flash", 1_000_000, false, 0.1, aliases = listOf("MiniMax-M3")),
+
+        // ---- 官方 UI 上有、但 key 只能按命名规律推断（标记 unverified）----
+        QModel("sonus", "Sonus", 1_000_000, false, 8.0, unverified = true),
+        QModel("qmodel_38flash", "Qwen3.8-Flash", 1_000_000, false, 0.0, unverified = true),
+        QModel("gm53flash", "GLM-5.3-Flash", 1_000_000, false, 0.1, unverified = true),
+
+        // ---- 官方 UI 上已看不到、但 key 仍然有效的老模型（留着兼容旧客户端）----
         QModel("lite", "Lite", 180_000, false),
-        QModel("cmodel", "Cantus", 1_000_000, true),
-        QModel("qmodel_38max", "Qwen3.8-Max", 1_000_000, true),
         QModel("qmodel_latest", "Qwen3.7-Max", 1_000_000, false),
         QModel("qmodel", "Qwen3.7-Plus", 1_000_000, false),
-        QModel("kmodel_latest", "Kimi-K3", 1_000_000, false),
-        QModel("kmodel", "Kimi-K2.7-Code", 256_000, false),
-        QModel("gmodel", "GLM-5.3", 1_000_000, true),
         QModel("gm51model", "GLM-5.2", 1_000_000, true),
-        QModel("dmodel", "DeepSeek-V4-Pro", 1_000_000, true),
-        QModel("dfmodel", "DeepSeek-V4-Flash", 1_000_000, true),
-        QModel("mmodel", "MiniMax-M3", 1_000_000, false),
     )
 
     /** 兼容旧引用名。 */
@@ -133,6 +153,9 @@ object QoderModelCatalog {
                     contextLength = if (d.contextLength > 0) d.contextLength else b.contextLength,
                     reasoning = d.reasoning,
                     priceFactor = d.priceFactor,
+                    // 官方目录里出现过 = 这个 key 是真的；旧名字继续当别名留着
+                    aliases = (b.aliases + d.name + b.name).distinct().filter { it != d.name || it == b.name },
+                    unverified = false,
                 ),
             )
             used.add(b.key)
@@ -227,13 +250,18 @@ object QoderModelCatalog {
         if (ctx <= 0) ctx = maxContextFrom(o.optJSONObject("context_config"))
         if (ctx <= 0) ctx = 180_000
 
-        val pf = o.optDouble("price_factor", 1.0)
+        // 目录里**没写** price_factor = 未知；写了 0 才是免费。默认 1.0 会把免费模型洗成收费。
+        val pf = if (o.has("price_factor") && !o.isNull("price_factor")) {
+            o.optDouble("price_factor", 1.0).let { if (it.isNaN() || it.isInfinite()) null else it }
+        } else {
+            null
+        }
         return QModel(
             key = key,
             name = name,
             contextLength = ctx,
             reasoning = o.optBoolean("is_reasoning", false),
-            priceFactor = if (pf.isNaN() || pf.isInfinite()) 1.0 else pf,
+            priceFactor = pf,
         )
     }
 
@@ -324,6 +352,7 @@ object QoderModelCatalog {
     private fun findByIdentifier(list: List<QModel>, identifier: String): QModel? =
         list.firstOrNull { it.key.equals(identifier, ignoreCase = true) }
             ?: list.firstOrNull { it.name.equals(identifier, ignoreCase = true) }
+            ?: list.firstOrNull { m -> m.aliases.any { it.equals(identifier, ignoreCase = true) } }
 
     /** 按 key 找（供内部使用，不做别名解析）。 */
     fun byKey(key: String): QModel? = current().firstOrNull { it.key == key }
@@ -343,17 +372,19 @@ object QoderModelCatalog {
         val arr = JSONArray()
         val created = System.currentTimeMillis() / 1000
         for (m in current()) {
-            arr.put(
-                JSONObject()
-                    .put("id", m.key)
-                    .put("object", "model")
-                    .put("created", created)
-                    .put("owned_by", "qoder")
-                    .put("name", m.name)
-                    .put("context_length", m.contextLength)
-                    .put("price_factor", m.priceFactor)
-                    .put("is_free", m.free),
-            )
+            val o = JSONObject()
+                .put("id", m.key)
+                .put("object", "model")
+                .put("created", created)
+                .put("owned_by", "qoder")
+                .put("name", m.name)
+                .put("context_length", m.contextLength)
+                .put("is_free", m.free)
+            // 倍率未知时**不写字段**：让展示层显示「倍率未知」，而不是编一个 ×1
+            m.priceFactor?.let { o.put("price_factor", it) }
+            if (m.unverified) o.put("unverified", true)
+            if (m.aliases.isNotEmpty()) o.put("aliases", JSONArray(m.aliases))
+            arr.put(o)
         }
         return arr
     }
@@ -386,8 +417,10 @@ object QoderModelCatalog {
 
     fun selfCheck() {
         // ---- 内置清单 ----
-        check(BUILTIN.size == 16) { "自检失败：Qoder 内置模型目录应为 16 条，实际 ${BUILTIN.size}" }
-        check(BUILTIN.map { it.key }.toSet().size == 16) { "自检失败：内置模型 key 有重复" }
+        check(BUILTIN.size == 19) { "自检失败：Qoder 内置模型目录应为 19 条，实际 ${BUILTIN.size}" }
+        check(BUILTIN.map { it.key }.toSet().size == 19) { "自检失败：内置模型 key 有重复" }
+        // 官方 APP 清单里两个 0 倍率模型必须在
+        check(BUILTIN.count { it.free } == 2) { "自检失败：内置清单应有 2 个免费模型（DeepSeek-Flash / Qwen3.8-Flash）" }
         check(BUILTIN.first().key == DEFAULT_KEY) { "自检失败：默认模型应排在最前" }
 
         // ---- 解析（用内置清单，不依赖是否已加载动态目录）----
@@ -411,6 +444,24 @@ object QoderModelCatalog {
         check(QModel("k", "n", 1, false, 2.5).priceLabel == "2.5") { "自检失败：2.5 倍率应显示 2.5" }
         check(QModel("k", "n", 1, false, 0.0).free) { "自检失败：0 倍率应算免费" }
         check(!QModel("k", "n", 1, false, 0.5).free) { "自检失败：0.5 倍率不该算免费" }
+        // 未知倍率：显示 ?，且**不能**算免费也不能算 1.0
+        check(QModel("k", "n", 1, false, null).priceLabel == "?") { "自检失败：未知倍率应显示 ?" }
+        check(!QModel("k", "n", 1, false, null).free) { "自检失败：未知倍率不该算免费" }
+
+        // 别名：官方改名后，旧名字必须还能解析到同一个 key
+        check(resolve("Ultimate").key == "ultimate") { "自检失败：别名 Ultimate 解析失败" }
+        check(resolve("Kimi-K3").key == "kmodel_latest") { "自检失败：旧名 Kimi-K3 应解析到 kmodel_latest" }
+        check(resolve("DeepSeek-V4-Flash").key == "dfmodel") { "自检失败：旧名 DeepSeek-V4-Flash 应解析到 dfmodel" }
+        check(resolve("Qwen3.8-Max").key == "qmodel_38max") { "自检失败：旧名 Qwen3.8-Max 应解析到 qmodel_38max" }
+        // 官方新名字（Qoder.txt 里抄的）必须能解析
+        check(resolve("Qwen3.8-Flash").key == "qmodel_38flash") { "自检失败：Qwen3.8-Flash 解析失败" }
+        check(resolve("DeepSeek-Flash").key == "dfmodel") { "自检失败：DeepSeek-Flash 解析失败" }
+        check(resolve("MiniMax-M3.1-Flash").key == "mmodel") { "自检失败：MiniMax-M3.1-Flash 解析失败" }
+        check(resolve("Kimi-K3.1-Pro").key == "kmodel_latest") { "自检失败：Kimi-K3.1-Pro 解析失败" }
+        check(resolve("Sonus").key == "sonus") { "自检失败：Sonus 解析失败" }
+        // 未验证 key 的模型必须带标记，UI 才能提示
+        check(byKey("sonus")?.unverified == true) { "自检失败：Sonus 的 key 是推断的，应标记 unverified" }
+        check(byKey("gmodel")?.unverified == false) { "自检失败：GLM-5.3 的 key 是确定的，不该标记 unverified" }
 
         // ---- 上游目录解析：CLI 分组格式 ----
         val cli = """
@@ -433,7 +484,7 @@ object QoderModelCatalog {
         // 合并语义：内置顺序不变、同 key 覆盖、新 key 追加
         val merged = merge(parsed)
         // 解析出 4 条：auto（内置已有，覆盖）+ free-model/paid/team-only（新增 3）→ 16 + 3
-        check(merged.size == 16 + 3) { "自检失败：合并后应为内置16 + 新3，实际 ${merged.size}" }
+        check(merged.size == 19 + 3) { "自检失败：合并后应为内置19 + 新3，实际 ${merged.size}" }
         check(merged.first().key == DEFAULT_KEY) { "自检失败：合并后默认模型必须仍在最前" }
         check(merged.first { it.key == "auto" }.priceFactor == 0.0) {
             "自检失败：同 key 应被上游倍率覆盖（auto 0.0）"
@@ -442,22 +493,23 @@ object QoderModelCatalog {
 
         // 应用动态目录后：新模型可解析、倍率生效、免费数正确
         setDynamic(parsed)
-        check(current().size == 19) { "自检失败：动态目录条数不对，实际 ${current().size}" }
+        check(current().size == 22) { "自检失败：动态目录条数不对，实际 ${current().size}" }
         check(resolve("Free Model").key == "free-model") { "自检失败：新模型按展示名解析失败" }
         check(byKey("free-model")?.free == true) { "自检失败：新免费模型未标记免费" }
-        check(freeCount() == 2) { "自检失败：免费模型数应为 2，实际 ${freeCount()}" }
+        // 动态目录里 auto / free-model 都是 0，加上内置的 dfmodel / qmodel_38flash → 4
+        check(freeCount() == 4) { "自检失败：免费模型数应为 4（内置2 + 目录2），实际 ${freeCount()}" }
 
         // 空/垃圾输入绝不能把目录清空
         check(parseCatalogJson("").isEmpty()) { "自检失败：空串应解析为空" }
         check(parseCatalogJson("not json").isEmpty()) { "自检失败：非 JSON 应解析为空" }
         check(parseCatalogJson("""{"foo":"bar"}""").isEmpty()) { "自检失败：无模型文档应解析为空" }
         setDynamic(parseCatalogJson("not json"))
-        check(current().size == 16) { "自检失败：解析失败必须退回内置清单，不能清空" }
+        check(current().size == 19) { "自检失败：解析失败必须退回内置清单，不能清空" }
 
         // ---- /v1/models 形状 ----
         setDynamic(null)
         val models = openAiModels()
-        check(models.length() == 16) { "自检失败：/v1/models 条数不对" }
+        check(models.length() == 19) { "自检失败：/v1/models 条数不对" }
         val first = models.getJSONObject(0)
         check(first.getString("object") == "model") { "自检失败：object 字段必须是 model" }
         check(first.getString("id") == DEFAULT_KEY) { "自检失败：首个模型 id 不对" }

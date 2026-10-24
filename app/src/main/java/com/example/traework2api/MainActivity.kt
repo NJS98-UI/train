@@ -265,6 +265,8 @@ class MainActivity : Activity() {
         GatewayBackend.selfCheck(this)
         // 按账号积分的展示规则自检（合计只加查到的、失败要暴露成下界、null ≠ 0）。
         AccountCredits.selfCheck()
+        // CLI 模型缓存解密自检（HKDF-SHA256 对齐 RFC 5869 + AES-GCM 往返 + 错 uid 必须解不开）。
+        QoderModelCache.selfCheck()
         // 装入按账号积分缓存：进账号页立刻有数，后台刷新再原地更新。
         AccountCredits.loadCache(this)
         // 保活页的 ROM 识别自检：SystemProperties 是隐藏 API（靠反射），读不到也不能崩。
@@ -931,6 +933,76 @@ class MainActivity : Activity() {
         java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(ms))
 
     /**
+     * 手动导入 Qoder CLI 的模型目录缓存（`catalog-v7` / `catalog-v6`）。
+     *
+     * 为什么要这条路：上游目录接口的响应体形状没有公开文档，实测只能确认路由存在（401）。
+     * CLI 缓存是**同一份数据**，且解密算法已知（HKDF 派生 key + AES-GCM），
+     * 所以让用户把文件内容粘进来，就能拿到**准确的 key 和官方倍率**。
+     */
+    private fun promptImportCatalog() {
+        val uid = QoderAuthStore.load(this)?.uid.orEmpty()
+        val edit = EditText(this).apply {
+            hint = "粘贴 catalog-v7 文件的全部内容（base64），或一段明文目录 JSON"
+            isSingleLine = false
+            maxLines = 8
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setTextColor(color("on_surface"))
+            setHintTextColor(color("on_surface_variant"))
+            background = shape("surface_container", RADIUS_CONTROL)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(edit)
+            addView(caption("在装过 Qoder CLI 的机器（比如代码空间）上执行："), top(12))
+            addView(mono(QoderModelCache.cliHint(uid)), top(4))
+            addView(caption("把输出的整段内容粘贴到上面即可。解密用当前账号的 uid，你不需要自己解。"), top(8))
+        }
+        confirmDialog(
+            title = "导入官方模型目录",
+            message = "拿到准确的模型 key 和官方倍率（含 0 倍率的免费模型）。",
+            okText = "导入",
+            content = panel,
+        ) {
+            val text = edit.text?.toString().orEmpty()
+            if (text.isBlank()) { toast("没有粘贴内容"); return@confirmDialog }
+            val r = QoderModelCache.importBlob(text, uid)
+            if (!r.ok) { toast(r.error ?: "导入失败"); return@confirmDialog }
+            // 落盘必须存**明文**：存密文的话下次启动 parseCatalogJson 解不出来，等于白导
+            r.plain?.let { QoderModelCatalog.save(this@MainActivity, it) }
+            modelsRefreshApply?.invoke()
+            toast("已导入 ${r.models} 个模型" + (if (r.decrypted) "（已解密）" else "") +
+                "，共 ${QoderModelCatalog.current().size} 个，免费 ${QoderModelCatalog.freeCount()} 个")
+        }
+    }
+
+    /** 把上次拉模型目录的**响应原文**摊开看（排查"对不上"用）。 */
+    private fun showLastCatalogRaw() {
+        val raw = QoderAuthApi.lastCatalogRaw
+        val err = QoderAuthApi.lastCatalogError
+        val body = when {
+            raw.isNullOrBlank() && err.isNullOrBlank() -> "还没有拉取过。点「同步官方目录」试一次。"
+            raw.isNullOrBlank() -> "没拿到响应体。\n失败信息：$err"
+            else -> "长度 ${raw.length}\n\n" + raw.take(4000) + if (raw.length > 4000) "\n…（已截断）" else ""
+        }
+        val tv = TextView(this).apply {
+            text = body
+            setTextIsSelectable(true)
+            setTextColor(color("on_surface"))
+            textSize = FS_CHIP.toFloat()
+            background = shape("surface_container", RADIUS_CONTROL)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+        }
+        val scroll = ScrollView(this).apply { addView(tv) }
+        confirmDialog(
+            title = "上次拉取的原文",
+            message = if (err.isNullOrBlank()) "接口回了下面这些内容。" else "失败：$err",
+            okText = "关闭",
+            content = scroll,
+        ) { }
+    }
+
+    /**
      * 从 Qoder 官方拉模型目录（含真实倍率、以及内置清单里没有的免费模型）。
      *
      * 失败**不清空**现有清单（内置清单永远兜底）：模型列表空了聊天直接废。
@@ -1374,6 +1446,20 @@ class MainActivity : Activity() {
         }
         addView(toolbar)
 
+        // Qoder 后端：官方目录的来源说明 + 导入/诊断入口。
+        // 为什么单独一张卡：官方 UI 的名字 ≠ 请求用的 key，倍率也只有官方目录才准；
+        // 用户遇到"对不上"时必须有个地方能导入真目录、能看见上游到底回了什么。
+        if (GatewayBackend.isQoder(this@MainActivity)) {
+            addView(card(tone = CardTone.SOFT) {
+                addView(text("官方模型目录", FS_CARD_TITLE, true))
+                addView(caption("官方 UI 上显示的名字只是**展示名**，请求要的是 key；倍率同理，" +
+                    "只有官方目录里的才是准的。拉不到就导入 Qoder CLI 的缓存文件（内容是一段 base64，整段粘贴即可）。"), top(6))
+                addView(action("同步官方目录", outlined = true, full = true) { refreshModels() }, top(10))
+                addView(action("导入 catalog-v7（CLI 缓存）", outlined = true, full = true) { promptImportCatalog() }, top(8))
+                addView(linkAction("查看上次拉取的原文（排查用）") { showLastCatalogRaw() }, top(10))
+            }, top(GAP))
+        }
+
         // 未加载：整页只有一张说明卡 + 刷新按钮（用户要的"空状态"，见 CHANGELOG 0.4.3）
         val notLoaded = card {
             addView(text("模型目录尚未加载", FS_CARD_TITLE, true))
@@ -1469,11 +1555,14 @@ class MainActivity : Activity() {
         // 官方标注的倍率：0 = 免费（Qoder 目录里确实有这种）。
         // 缺字段时**不显示**而不是显示 ×1 —— 显示错误的倍率比不显示更误导。
         val pf = if (m.has("price_factor")) m.optDouble("price_factor", 1.0) else null
+        val unverified = m.optBoolean("unverified", false)
         addView(row {
             addView(text(name, FS_CARD_TITLE, true), weighted())
             if (pf != null) {
                 if (pf <= 0.0) addView(chipOk("免费"))
                 else addView(chipInfo("×" + priceText(pf)))
+            } else {
+                addView(chipInfo("倍率未知"))
             }
         })
         addView(row(4) {
@@ -1487,7 +1576,8 @@ class MainActivity : Activity() {
         //    裸 this 是容器不是 Context，编译期直接报 argument type mismatch。
         val backendTag = if (GatewayBackend.isQoder(this@MainActivity)) "qoder" else "trae-solo"
         val pfText = if (pf == null) "倍率未知" else if (pf <= 0.0) "免费（0 倍率）" else "倍率 ×${priceText(pf)}"
-        addView(caption("context ${m.optInt("context_length", 0)} · $pfText · $backendTag"), top(4))
+        val keyNote = if (unverified) " · key 未验证" else ""
+        addView(caption("context ${m.optInt("context_length", 0)} · $pfText · $backendTag$keyNote"), top(4))
     }
 
     private fun copyModelId(id: String) = copyToClipboard("modelId", id, "已复制模型 ID: $id")

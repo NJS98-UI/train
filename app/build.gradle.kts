@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.traework2api"
         minSdk = 24
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.4.14"
+        versionCode = 19
+        versionName = "0.4.15"
     }
 
     // 固定签名：debug / release 共用仓库内 keystore，保证任何机器 / CI 构建出的 APK 签名一致。
