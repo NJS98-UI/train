@@ -578,17 +578,37 @@ object QoderAuthApi {
     private fun claimDailyForCred(context: Context, cred: QoderAuthStore.QCred): QClaimResult {
         // 国际/国内同走干净链路（不带 Cosy-Machine* 头）。桌面端专属「每天领 100 Credits」
         // 活动在没有原生指纹时服务端会正常缺席，但其它通用活动仍可领；无需再对国际版硬挡 unsupported。
-        val jt = validJobTokenFor(context, cred, skewMillis = 60_000L)
+        var jt = validJobTokenFor(context, cred, skewMillis = 60_000L)
         if (jt.isNullOrBlank()) return QClaimResult("fail", 0, "没有有效 token，请重新粘贴 PAT 登录")
         // 国际版：带机器身份（有抓包真货用真货，否则用官方无-umid 的等价身份）。
         // 国内版刻意不带 —— 对照实验里国内带指纹反而 no_campaign。
         val identity = if (cred.mode == MODE_GLOBAL) {
             QoderMachine.identity(context, QoderAuthStore.fingerprint(context, cred.uid))
         } else null
-        val campaigns = try {
-            fetchCampaigns(jt, cred.mode, identity)
-        } catch (e: Exception) {
-            return QClaimResult("fail", 0, "拉取活动失败：${e.message ?: e.javaClass.simpleName}")
+
+        // 活动列表**是动态的**（实测：凌晨查没有「每天领 100 Credits」，过几小时才出现），
+        // 所以一次拉空不等于今天没得领 —— 同一轮里重试几次，别让用户白等一天。
+        // 顺带自愈 401：jobToken 被判废就地续一次再试。
+        var campaigns: List<QCampaign> = emptyList()
+        var lastError: String? = null
+        for (attempt in 1..3) {
+            try {
+                campaigns = fetchCampaigns(jt, cred.mode, identity)
+                lastError = null
+                if (campaigns.any { it.claimable }) break
+            } catch (e: Exception) {
+                val msg = e.message ?: e.javaClass.simpleName
+                lastError = msg
+                if (msg.contains("401")) {
+                    jt = forceRefreshJobToken(context, cred) ?: jt
+                }
+            }
+            if (attempt < 3) {
+                try { Thread.sleep(2_000L) } catch (_: InterruptedException) { break }
+            }
+        }
+        if (campaigns.isEmpty() && lastError != null) {
+            return QClaimResult("fail", 0, "拉取活动失败：$lastError")
         }
         val claimable = campaigns.filter { it.claimable }
         if (claimable.isEmpty()) {
