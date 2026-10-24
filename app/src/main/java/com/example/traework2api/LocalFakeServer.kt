@@ -435,7 +435,15 @@ class LocalFakeServer(private val apiKey: String) {
             }
 
             val out = sock.getOutputStream()
+            // 路径归一化：客户端拼 baseURL 的方式五花八门 ——
+            //   `http://host/v1/` + `/models`  → `/v1//models`（双斜杠）
+            //   `http://host/v1` + `/models/`  → `/v1/models/`（尾斜杠）
+            // 这两种都**必须**当正常路径处理：只认精确 `/v1/models` 的话，
+            // 客户端会拿到 404，表现为"模型列表读不出来 / 一个都没有"。
+            // 归一化只做「合并重复斜杠 + 去掉尾斜杠」，不碰大小写也不做模糊匹配。
             val query = path.substringBefore('?')
+                .replace(Regex("/{2,}"), "/")
+                .let { if (it.length > 1) it.trimEnd('/').ifEmpty { "/" } else it }
             // 访问日志：客户端的路径五花八门（实测 Chatbox 走的就不是官方 SDK 那套），
             // 出问题时靠它一眼看出"对方到底请求了哪个路径、我们答了什么" ——
             // 没有这行日志时只能靠猜（这正是"获取模型失败"排查卡住的原因）。
