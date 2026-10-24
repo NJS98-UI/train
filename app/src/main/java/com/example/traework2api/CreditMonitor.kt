@@ -12,7 +12,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 覆盖两套账号：
  *  - **Trae**（国服）：真正驱动 OpenAI 转发的账号。查 [TraeUpstream.fetchUsage]，
  *    用完就在其余国服账号里找一个有积分的，`setActive` + `syncRegionToActiveAccount`（下一个请求即走新号）。
- *  - **Qoder**：仅积分管理（不参与转发）。查 [QoderAuthApi.fetchCredits]，用完在其余 Qoder 账号里换。
+ *  - **Qoder**：积分管理 + **可选作为聊天转发后端**（见 [GatewayBackend] / [QoderUpstream]）。
+ *    查 [QoderAuthApi.fetchCredits]，用完在其余 Qoder 账号里换。
  *
  * 设计约束：
  *  - **单后台线程串行**，每个 tick 对每个 provider 最多 1 次读；只有真要换号时才一次性扫描其余账号，

@@ -85,6 +85,34 @@ object Gateway {
                 TraeAuthStore.syncRegionToActiveAccount(app)
             }
         }
+        // ---- Qoder 后端（COSY 签名聊天，见 QoderUpstream）----
+        // 模型表/后端选择：auto 时"只登了 Qoder 账号"就直接走 Qoder，老用户行为不变。
+        s.appContext = app
+        s.modelsProvider = { GatewayBackend.modelsFor(app) }
+        s.backendProvider = { GatewayBackend.resolved(app) }
+        s.qoderCredProvider = {
+            locked<QoderAuthStore.QCred?> {
+                val cred = QoderAuthStore.load(app) ?: return@locked null
+                // 转发前续期：jobToken 是短时的，服务长驻不能只靠登录时那一个。
+                val jt = QoderAuthApi.validJobTokenFor(app, cred, SIXTY_MINUTES_SEC) ?: cred.jobToken
+                if (jt.isBlank()) null else cred.copy(jobToken = jt)
+            }
+        }
+        s.qoderFailoverProvider = qoderFailover@{ failedUid, err ->
+            val next = QoderAuthStore.list(app).firstOrNull { it.uid != failedUid }
+                ?: return@qoderFailover null
+            android.util.Log.i(TAG, "Qoder 转发失败($err)，自动换到账号 ${next.uid}")
+            locked<QoderAuthStore.QCred?> {
+                QoderAuthStore.setActive(app, next.uid)
+                val c = QoderAuthStore.load(app) ?: return@locked null
+                val jt = QoderAuthApi.validJobTokenFor(app, c, SIXTY_MINUTES_SEC) ?: c.jobToken
+                if (jt.isBlank()) null else c.copy(jobToken = jt)
+            }
+        }
+        s.qoderRollback = { originalUid ->
+            android.util.Log.i(TAG, "Qoder 换号后仍失败，切回原账号 $originalUid")
+            locked { QoderAuthStore.setActive(app, originalUid) }
+        }
         server = s
         s.start()
         android.util.Log.i(TAG, "网关已启动，端口 ${LocalFakeServer.PORT}")

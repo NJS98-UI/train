@@ -14,9 +14,12 @@ import java.util.concurrent.TimeUnit
  *
  * 关键结论（来自多个独立社区实现交叉印证）：
  * - Qoder 对外可用凭据是 **PAT（`pt-`）**，不能直接调 API，要先换短时 **jobToken（`jt-`）**。
- * - `jobToken/exchange`、`jobToken/refresh`、`quota/usage` **都不需要 COSY 签名**
- *   （COSY 只有聊天网关 `/algo/...` 才要，本 App 不接入聊天，故这里无需实现签名）。
- * - 区域不同 host 不同：国内 `openapi.qoder.com.cn`；国际 `openapi.qoder.sh`。
+ * - `jobToken/exchange`、`jobToken/refresh`、`quota/usage` **都不需要 COSY 签名**。
+ *   只有聊天网关 `/algo/...` 要签名 —— 那部分在 [QoderUpstream] / [QoderCosyCrypto]。
+ * - 区域不同 host 不同：
+ *     openapi 国内 `openapi.qoder.com.cn` / 国际 `openapi.qoder.sh`
+ *     infer   国内 `gateway.qoder.com.cn`  / 国际 `api2.qoder.sh`
+ *   两套 host **不能混用**：拿国内的 jobToken 打国际 infer 一律 401。
  *
  * token 只进内存与请求头，绝不落日志。
  */
@@ -45,6 +48,15 @@ object QoderAuthApi {
     /** 按 mode 取 OpenAPI host。未知 mode 一律按国内（主链路）。 */
     private fun openApiBase(mode: String): String =
         if (mode == MODE_GLOBAL) "https://openapi.qoder.sh" else "https://openapi.qoder.com.cn"
+
+    /**
+     * 按 mode 取**聊天转发** host（COSY `/algo/` 专用）。
+     *
+     * ⚠️ 与 [openApiBase] 是两套域名，绝不能拿错：聊天网关不在 openapi 上。
+     * 参考实现里 `infer` 国内 `gateway.qoder.com.cn`、国际 `api2.qoder.sh`。
+     */
+    fun inferBase(mode: String): String =
+        if (mode == MODE_GLOBAL) "https://api2.qoder.sh" else "https://gateway.qoder.com.cn"
 
     private fun post(url: String, body: JSONObject): String {
         val req = Request.Builder().url(url)
@@ -110,19 +122,52 @@ object QoderAuthApi {
         return System.currentTimeMillis() + 24L * 3600_000L
     }
 
-    data class QUserInfo(val uid: String, val email: String, val name: String)
+    /**
+     * 账号身份 + **COSY 运行时字段所需的组织信息**。
+     *
+     * 为什么要把组织字段一起抓回来：`/algo/` 聊天签名里的 AES 明文（`runtimeFieldInput`）
+     * 必须带 `organization_id` / `organization_tags` / `data_policy_agreed`，
+     * 它们只能在登录时从 userinfo 拿到。漏抓就得每次聊天前多打一次 userinfo（还容易过期）。
+     */
+    data class QUserInfo(
+        val uid: String,
+        val email: String,
+        val name: String,
+        val organizationId: String = "",
+        val organizationName: String = "",
+        val organizationTags: List<String> = emptyList(),
+        val dataPolicyAgreed: Boolean = false,
+        val isDataPolicyModifiable: Boolean = true,
+    )
 
-    /** 用 jobToken 拉账号身份；失败返回空字段（调用方 login 需判 uid 非空）。 */
+    /**
+     * 用 jobToken 拉账号身份；失败返回空字段（调用方 login 需判 uid 非空）。
+     *
+     * uid 取值兼容三种写法：`uid`（参考实现）、`id`、`userID`（历史 OpenAPI 返回过）。
+     */
     fun fetchUserInfo(jt: String, mode: String): QUserInfo = try {
         val o = JSONObject(getBearer(openApiBase(mode) + EP_USERINFO, jt))
         QUserInfo(
-            uid = o.optString("id", o.optString("userID", "")),
+            uid = o.optString("uid", "").ifBlank { o.optString("id", "") }
+                .ifBlank { o.optString("userID", "") },
             email = o.optString("email", ""),
             name = o.optString("name", o.optString("username", "")),
+            organizationId = o.optString("organization_id", ""),
+            organizationName = o.optString("organization_name", ""),
+            organizationTags = parseStringList(o.opt("organization_tags")),
+            dataPolicyAgreed = o.optBoolean("data_policy_agreed", false),
+            isDataPolicyModifiable = o.optBoolean("is_data_policy_modifiable", true),
         )
     } catch (e: Exception) {
         Log.w(TAG, "userinfo 失败: ${e.javaClass.simpleName}")
         QUserInfo("", "", "")
+    }
+
+    /** 组织标签可能是字符串数组，也可能是单个逗号分隔字符串（两种都实测见过）。 */
+    private fun parseStringList(raw: Any?): List<String> = when (raw) {
+        is org.json.JSONArray -> (0 until raw.length()).mapNotNull { raw.optString(it, "").takeIf { s -> s.isNotBlank() } }
+        is String -> raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        else -> emptyList()
     }
 
     data class QCredits(val remaining: Double, val exceeded: Boolean) {
@@ -170,6 +215,9 @@ object QoderAuthApi {
         val cred = QoderAuthStore.QCred(
             pat = trimmed, jobToken = jt.token, jobRefreshToken = jt.refreshToken,
             expiresAt = jt.expiresAtMillis, uid = uid, name = info.name, email = info.email, mode = mode,
+            organizationId = info.organizationId, organizationName = info.organizationName,
+            organizationTags = info.organizationTags, dataPolicyAgreed = info.dataPolicyAgreed,
+            isDataPolicyModifiable = info.isDataPolicyModifiable,
         )
         QoderAuthStore.save(context, cred)
         Log.i(TAG, "Qoder PAT 登录成功 uid=$uid mode=$mode")
@@ -201,6 +249,29 @@ object QoderAuthApi {
             context,
             cred.copy(jobToken = renewed.token, jobRefreshToken = renewed.refreshToken.ifBlank { cred.jobRefreshToken },
                 expiresAt = renewed.expiresAtMillis),
+        )
+        return renewed.token
+    }
+
+    /**
+     * **强制**续一次 jobToken（不看是否临期），供转发链路撞到 401 时救急。
+     *
+     * 与 [validJobTokenFor] 的区别：那个是"快过期才续"，这个是"已经被拒了就续"。
+     * 续不动返回 null（调用方据此把 401 报给客户端，别无限重试）。
+     */
+    fun forceRefreshJobToken(context: Context, cred: QoderAuthStore.QCred): String? {
+        val renewed: JobToken = runCatching {
+            if (cred.jobRefreshToken.isNotBlank()) refreshJobToken(cred.jobRefreshToken, cred.mode)
+            else if (cred.pat.isNotBlank()) exchangeJobToken(cred.pat, cred.mode)
+            else null
+        }.getOrNull() ?: return null
+        QoderAuthStore.updateTokens(
+            context,
+            cred.copy(
+                jobToken = renewed.token,
+                jobRefreshToken = renewed.refreshToken.ifBlank { cred.jobRefreshToken },
+                expiresAt = renewed.expiresAtMillis,
+            ),
         )
         return renewed.token
     }

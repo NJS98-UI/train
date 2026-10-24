@@ -58,6 +58,36 @@ class LocalFakeServer(private val apiKey: String) {
     @Volatile
     var failoverRollback: ((originalUid: String) -> Unit)? = null
 
+    /**
+     * 模型表提供者。默认 Trae（[ModelsRepo]），切到 Qoder 后端时由 [Gateway] 换成
+     * [QoderModelCatalog.openAiModels]。`/v1/models` 与模型页都读它。
+     */
+    @Volatile
+    var modelsProvider: (() -> JSONArray)? = null
+
+    /** 当前生效的转发后端（`trae` / `qoder`），由 [GatewayBackend.resolved] 决定。 */
+    @Volatile
+    var backendProvider: (() -> String)? = null
+
+    /**
+     * Qoder 凭证提供者：每次转发前取「当下有效」的 jobToken（必要时续期）。
+     * 与 [credProvider] 并列，两者按后端二选一调用。
+     */
+    @Volatile
+    var qoderCredProvider: (() -> QoderAuthStore.QCred?)? = null
+
+    /** Qoder 故障转移：上一个账号未输出就失败时换一个 Qoder 账号。 */
+    @Volatile
+    var qoderFailoverProvider: ((failedUid: String, err: String) -> QoderAuthStore.QCred?)? = null
+
+    /** Qoder 换号也没救活时切回原账号。 */
+    @Volatile
+    var qoderRollback: ((originalUid: String) -> Unit)? = null
+
+    /** Qoder 聊天需要 Context（取机器标识 / 续 token）。由 [Gateway] 注入 applicationContext。 */
+    @Volatile
+    var appContext: Context? = null
+
     companion object {
         /**
          * 8788 太常见（各类本地服务 demo 都爱用它），容易与其他 App 的测试服务撞端口。
@@ -414,7 +444,7 @@ class LocalFakeServer(private val apiKey: String) {
                 // 只认 `/v1/models` 会让它们在"获取模型"这一步直接失败。两个都收。
                 query == "/v1/models" || query == "/models" -> {
                     // /v1/models 仅返回固定模型清单（无敏感数据），免鉴权便于各类客户端拉取；ponytail: 聊天接口仍必须鉴权
-                    val data = staticModels()
+                    val data = models()
                     android.util.Log.i(TAG, "← 200 $query （${data.length()} 个模型）")
                     writeJson(out, 200, JSONObject().put("object", "list").put("data", data))
                 }
@@ -435,6 +465,27 @@ class LocalFakeServer(private val apiKey: String) {
                             "请求体过大（上限 ${MAX_BODY_BYTES / 1024 / 1024} MB）", 413))
                         return
                     }
+                    val backend = try { backendProvider?.invoke() } catch (_: Exception) { null }
+                        ?: GatewayBackend.TRAE
+                    if (backend == GatewayBackend.QODER) {
+                        // ---- Qoder 后端（COSY 签名链路）----
+                        val qcred = try { qoderCredProvider?.invoke() } catch (e: Exception) {
+                            android.util.Log.w(TAG, "取 Qoder 凭证失败: ${e.javaClass.simpleName}: ${e.message}")
+                            null
+                        }
+                        if (qcred == null || !qcred.chatReady) {
+                            writeJson(out, 200, fakeCompletion())
+                        } else {
+                            try {
+                                streamingQoderChat(out, body, qcred)
+                            } catch (e: Exception) {
+                                android.util.Log.w(TAG, "Qoder 转发失败: ${e.javaClass.simpleName}: ${e.message}")
+                                try { writeJson(out, 502, openAIError("upstream_error", "上游转发失败", 502)) } catch (_: Exception) {}
+                            }
+                        }
+                        return
+                    }
+                    // ---- Trae 后端（原有链路）----
                     // 每次请求都问一次「当下有效」的凭证：服务长驻，token 会过期，
                     // 靠启动时快照的那一个迟早变 401（见 credProvider 注释）。
                     val fresh = try { credProvider?.invoke() } catch (e: Exception) {
@@ -481,31 +532,33 @@ class LocalFakeServer(private val apiKey: String) {
     private fun readChunkedBody(input: java.io.InputStream): String =
         Companion.readChunkedBody(input)
 
+    /** `/v1/models` 的数据源：按后端切换（Qoder 目录是内置的，Trae 是刷新来的）。 */
+    private fun models(): JSONArray =
+        try { modelsProvider?.invoke() } catch (_: Exception) { null } ?: staticModels()
+
+    /** 请求体是信任边界：空体/非法 JSON 必须回 400，绝不能让 JSONException 冒泡到连接线程。 */
+    private fun parseBodyOr400(out: OutputStream, body: String): org.json.JSONObject? = try {
+        org.json.JSONObject(body)
+    } catch (_: org.json.JSONException) {
+        writeJson(out, 400, openAIError("invalid_request_error", "请求体不是合法 JSON", 400))
+        null
+    }
+
     /**
-     * 走真实 Trae 转发：先写 SSE 响应头，再把转换后的 chunk 逐块写回客户端。
+     * 流式转发的**公共骨架**：写响应头、攒帧、判定"是否已开始输出"、换号、收尾聚合。
      *
-     * **故障转移**：上游"还没吐出任何正文就失败"时（典型：账号 token 死了的 401、
-     * 限流的 429、上游 5xx），换一个账号重试一次（见 [failoverProvider]）。
-     * 判定依据是「有没有出现过带 `choices` 的帧」—— 上游只有在成功路径上才会发它，
-     * 失败路径只发 `event: error` + `[DONE]`。所以在看到第一个 `choices` 帧之前，
-     * 输出先攒着不发给客户端；一旦确认这次成了，就把攒下的刷出去并转为直写。
-     * 这样换号成功时客户端**看不到**上一个账号的报错（否则它会先收到 `[DONE]` 又来数据）。
-     * 已经在流里的半截回答无法撤回，所以**只允许在未输出时换**，且只换一次。
+     * 抽出来的理由：Trae 与 Qoder 两条上游的协议完全不同（请求体、签名、SSE 帧格式），
+     * 但"什么时候允许换号""非流式怎么聚合""用量怎么记"这套控制流**必须一致** ——
+     * 抄两遍迟早改一边漏一边（换号判定错一次就会把真错误藏起来、白烧另一个账号）。
      */
-    private fun streamingChat(out: OutputStream, body: String, cred: TraeAuthStore.Cred) {
-        // 请求体是信任边界：空体/非法 JSON 必须回 400，绝不能让 JSONException 冒泡
-        // 到连接线程（那样会杀掉整个进程）。
-        val src = try {
-            org.json.JSONObject(body)
-        } catch (_: org.json.JSONException) {
-            writeJson(out, 400, openAIError("invalid_request_error", "请求体不是合法 JSON", 400))
-            return
-        }
-        // ⚠️ 必须在 prepareBody **之前**读：prepareBody 会把 `stream` 原地改成 true
-        //（上游只认流式），改完就看不到客户端原本要的是不是非流式了。
-        val wantsStream = src.optBoolean("stream", false)
-        val prepared = TraeUpstream.prepareBody(src)
-        val model = prepared.optString("model", "")
+    private fun streamWithFailover(
+        out: OutputStream,
+        wantsStream: Boolean,
+        model: String,
+        runUpstream: (emit: (String) -> Unit, done: (org.json.JSONObject?, String?) -> Unit) -> Unit,
+        tryFailover: (err: String) -> Boolean,
+        onRollback: () -> Unit,
+    ) {
         if (wantsStream) {
             out.write("HTTP/1.1 200 OK\r\n".toByteArray())
             out.write("Content-Type: text/event-stream\r\n".toByteArray())
@@ -526,16 +579,14 @@ class LocalFakeServer(private val apiKey: String) {
             try { out.write(s.toByteArray(Charsets.UTF_8)); out.flush() } catch (_: java.io.IOException) {}
         }
 
-        var cur = cred
         var attempt = 0
-        val originalUid = cred.uid   // 换号失败时要还原的对象
         while (true) {
             val t0 = System.currentTimeMillis()
             val pending = ArrayList<String>()
             var streaming = false          // 已确认这次上游成功（出现过 choices 帧）
             var usage: org.json.JSONObject? = null
             var err: String? = null
-            TraeUpstream.chatStream(prepared, cur.accessToken, cur.uid, { chunk ->
+            runUpstream({ chunk ->
                 if (streaming) writeChunk(chunk)
                 else {
                     pending.add(chunk)
@@ -548,20 +599,20 @@ class LocalFakeServer(private val apiKey: String) {
             }) { u, e -> usage = u; err = e }
 
             // 换号条件：这次没成功 + 错误值得换 + 还没换过 + 确实有别的账号
-            val next = if (!streaming && err != null && attempt == 0 && retryableUpstreamError(err!!)) {
-                try { failoverProvider?.invoke(cur.uid, err!!) } catch (e: Exception) {
+            val switched = if (!streaming && err != null && attempt == 0 && retryableUpstreamError(err!!)) {
+                try { tryFailover(err!!) } catch (e: Exception) {
                     android.util.Log.w(TAG, "换号失败: ${e.javaClass.simpleName}: ${e.message}")
-                    null
-                }?.takeIf { it.accessToken.isNotBlank() && it.uid != cur.uid }
-            } else null
+                    false
+                }
+            } else false
 
-            if (next == null) {
+            if (!switched) {
                 // 收尾：把攒下的（正常情况下是错误事件）交给客户端
                 for (p in pending) writeChunk(p)
                 usageRecorder?.invoke(model, usage, System.currentTimeMillis() - t0, err == null, err)
                 // 换了号却没救活 → 还原成用户原来的账号，免得每次请求都换一次、来回跳
                 if (attempt > 0 && err != null) {
-                    try { failoverRollback?.invoke(originalUid) } catch (e: Exception) {
+                    try { onRollback() } catch (e: Exception) {
                         android.util.Log.w(TAG, "还原账号失败: ${e.javaClass.simpleName}: ${e.message}")
                     }
                 }
@@ -569,10 +620,76 @@ class LocalFakeServer(private val apiKey: String) {
                 if (collected != null) writeJson(out, 200, aggregateChunks(collected, model))
                 return
             }
-            android.util.Log.i(TAG, "账号 ${cur.uid} 失败(${err})，换 ${next.uid} 重试")
-            cur = next
+            android.util.Log.i(TAG, "换号后重试（原错误: $err）")
             attempt++
         }
+    }
+
+    /**
+     * 走真实 Trae 转发（原有链路）。
+     *
+     * ⚠️ `wantsStream` 必须在 `prepareBody` **之前**读：prepareBody 会把 `stream` 原地改成 true
+     *（上游只认流式），改完就看不到客户端原本要的是不是非流式了。
+     */
+    private fun streamingChat(out: OutputStream, body: String, cred: TraeAuthStore.Cred) {
+        val src = parseBodyOr400(out, body) ?: return
+        val wantsStream = src.optBoolean("stream", false)
+        val prepared = TraeUpstream.prepareBody(src)
+        val model = prepared.optString("model", "")
+        var cur = cred
+        val originalUid = cred.uid   // 换号失败时要还原的对象
+        streamWithFailover(
+            out = out,
+            wantsStream = wantsStream,
+            model = model,
+            runUpstream = { emit, done ->
+                TraeUpstream.chatStream(prepared, cur.accessToken, cur.uid, emit, done)
+            },
+            tryFailover = { err ->
+                val next = failoverProvider?.invoke(cur.uid, err)
+                    ?.takeIf { it.accessToken.isNotBlank() && it.uid != cur.uid }
+                if (next != null) { cur = next; true } else false
+            },
+            onRollback = { failoverRollback?.invoke(originalUid) },
+        )
+    }
+
+    /**
+     * 走 Qoder COSY 签名转发（[QoderUpstream]）。
+     *
+     * 与 Trae 的差别只有"上游怎么打"，控制流共用 [streamWithFailover]。
+     * 401 时由 [QoderAuthApi.forceRefreshJobToken] 强制续一次再重试（续不动就报错）。
+     */
+    private fun streamingQoderChat(out: OutputStream, body: String, cred: QoderAuthStore.QCred) {
+        val ctx = appContext ?: throw IllegalStateException("Qoder 转发缺少 Context")
+        val src = parseBodyOr400(out, body) ?: return
+        val wantsStream = src.optBoolean("stream", false)
+        val model = src.optString("model", "")
+        var cur = cred
+        val originalUid = cred.uid
+        streamWithFailover(
+            out = out,
+            wantsStream = wantsStream,
+            model = model,
+            runUpstream = { emit, done ->
+                QoderUpstream.chatStream(
+                    context = ctx,
+                    clientBody = src,
+                    cred = cur,
+                    out = emit,
+                    onResult = done,
+                    refreshJobToken = {
+                        QoderAuthApi.forceRefreshJobToken(ctx, cur)?.also { t -> cur = cur.copy(jobToken = t) }
+                    },
+                )
+            },
+            tryFailover = { err ->
+                val next = qoderFailoverProvider?.invoke(cur.uid, err)
+                    ?.takeIf { it.chatReady && it.uid != cur.uid }
+                if (next != null) { cur = next; true } else false
+            },
+            onRollback = { qoderRollback?.invoke(originalUid) },
+        )
     }
 
     private fun authorized(auth: String?): Boolean {

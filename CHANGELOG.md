@@ -8,6 +8,60 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.4.13] - 2026-10-16
+
+**Qoder 账号可作本地聊天转发后端（COSY `/algo/` 签名链路）。**
+`versionName` 0.4.12 → **0.4.13**、`versionCode` 16 → **17**。
+
+### Added
+
+1. **Qoder 聊天转发**（新增 `QoderUpstream.kt` / `QoderCosyCrypto.kt` / `QoderModelCatalog.kt`）
+   —— 本地 `:8787/v1/chat/completions` 现在可以把请求转给 **Qoder**，不再只有 Trae。
+   与 Trae 链路并列、互不影响：Trae 走 `solo_work_remote` + `Cloud-IDE-JWT`，
+   Qoder 走 `/algo/api/v2/service/pro/sse/agent_chat_generation` + COSY 签名头。
+2. **COSY 签名全套原语**（`QoderCosyCrypto.kt`）—— 逐字节对齐参考实现：
+   自定义 base64（字母表 `_doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!`、`$` 填充）
+   + 首尾三段交换（自反）+ MD5 签名（覆盖 payload / `Cosy-Key` / unix 秒 / body 密文 / 固定路径，
+   **末尾无换行**）+ 运行时字段（16 随机字节 → 反序掩码 UUID → 前 8 字节 hex 当 AES-128 key/IV →
+   AES-CBC-PKCS7 加密用户信息 → RSA-PKCS1v15 加密密钥，手动构造 EM）。
+3. **Qoder 模型目录**（`QoderModelCatalog.kt`）—— 内置 16 个模型（`auto`/`ultimate`/`qmodel`/`gmodel`/
+   `dmodel`/`kmodel`/`mmodel` …），支持 key、展示名、大小写不敏感解析，以及 `[1m]` 后缀
+   （上下文不足 900k 时升级到 `ultimate`）。每个模型一个**持久会话 id**。
+4. **转发后端切换**（新增 `GatewayBackend.kt`）—— 账号页新增「聊天转发后端」卡：
+   `Trae` / `Qoder` / `自动`。**默认自动**：有 Trae 账号走 Trae（老用户行为不变），
+   只登了 Qoder 才走 Qoder。切换**立即生效**（网关按请求读当前后端，不需要重启服务）。
+5. **401 自动续期**（`QoderAuthApi.forceRefreshJobToken`）—— Qoder 上游返回 401 时先强制续一次
+   jobToken 再重试；续不动才报错。另有 408/429/5xx 与上游排队（`code:10605` /
+   `queue.isQueued`）的退避重试，最多 3 次、等待上限 30s。
+
+### Changed
+
+1. **Qoder 账号元数据扩展**（`QoderAuthStore.kt` / `QoderAuthApi.kt`）—— userinfo 现在同时抓
+   `organization_id` / `organization_name` / `organization_tags` / `data_policy_agreed` /
+   `is_data_policy_modifiable`，随账号索引一起持久化（非敏感、明文）并进入导出/导入 JSON。
+   这些是 COSY 签名 AES 明文里的必填项，漏抓就会 401。旧索引（无这些字段）按默认值兼容读取。
+   `uid` 取值同时兼容 `uid` / `id` / `userID` 三种写法。
+2. **`LocalFakeServer` 转发骨架抽公共层** —— 原来只服务 Trae 的 `streamingChat` 拆成
+   `streamWithFailover`（响应头 / 攒帧 / 「未输出才允许换号」/ 非流式聚合 / 用量记账）
+   + `streamingChat`（Trae）+ `streamingQoderChat`（Qoder）。控制流只有一份，
+   避免两条链路各改一边导致换号判定不一致。
+3. **模型页与 `/v1/models` 按后端切换** —— Qoder 后端返回内置 16 个模型（`QoderModelCatalog`），
+   Trae 后端仍读 `ModelsRepo`（刷新来的表）。Qoder 后端点「刷新模型」只重画并提示"内置清单无需刷新"，
+   不再拿 Trae token 去打 Trae 接口。
+4. **文档口径修正** —— `QoderAuthStore` / `CreditMonitor` / 账号页说明里
+   「Qoder 仅积分检测、不参与转发」的旧表述已改为「可作转发后端」，避免误导。
+
+### Notes
+
+- 机器标识 `Cosy-MachineId` 首次使用时生成 UUID 并持久化（`q_machine_id`）。
+  它与参考实现一致，**不伪造** `Cosy-MachineToken` / `Cosy-MachineType`（参考实现在发请求前就把它们删掉）。
+- 签名聊天请求**刻意不带 User-Agent**，与参考实现一致。
+- 签名链路与 OpenAPI 是两套域名：聊天走 `infer`（国内 `gateway.qoder.com.cn` /
+  国际 `api2.qoder.sh`），积分/身份走 `openapi`（`openapi.qoder.com.cn` / `openapi.qoder.sh`）。
+- 新增 4 组启动自检（COSY 原语、模型目录、上游请求体、后端选择），错在本地就炸，不到线上撞 401。
+
+---
+
 ## [0.4.12] - 2026-10-14
 
 **新增多账号批量签到与每日定时签到；概览页服务地址改为带 `/v1` 并给出局域网地址。**

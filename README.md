@@ -1,10 +1,10 @@
 # TraeWork2API · Android 原生版
 
-> 把你的 **Trae（国内版 trae.cn）账号额度**，变成手机本地一个标准的 **OpenAI 兼容 API**。
+> 把你的 **Trae（国内版 trae.cn）或 Qoder 账号额度**，变成手机本地一个标准的 **OpenAI 兼容 API**。
 > 纯原生 Android 实现（Kotlin），**无需 Python、无需 Docker、无需电脑**——装到手机上就能跑。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/version-0.4.9-green.svg)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/version-0.4.13-green.svg)](CHANGELOG.md)
 
 ---
 
@@ -12,7 +12,7 @@
 
 一个跑在 Android 手机上的本地 API 网关。启动后，你手机/电脑上的其它 App（Chatbox、
 沉浸式翻译、Cherry Studio、OpenAI SDK……任何支持 OpenAI 协议的客户端）都能连接它，
-用**你自己的 Trae 账号**正常聊天：
+用**你自己的 Trae / Qoder 账号**正常聊天：
 
 ```
 手机/电脑上的 OpenAI 兼容客户端
@@ -27,21 +27,26 @@
 │  ├─ 模型表持久化 + 静默补新       │
 │  └─ 前台服务保活（看门狗+唤醒锁） │
 └─────────────────────────────────┘
-        │  Trae SOLO 国服上游
+        │  上游二选一：Trae SOLO（国服/国际）或 Qoder（COSY 签名）
         ▼
-     Trae 官方服务器
+   Trae / Qoder 官方服务器
 ```
 
-**消耗的是你 Trae 账号自己的额度**，不需要向任何 API 中间商付费，数据也不经过第三方。
+**消耗的是你自己账号的额度**，不需要向任何 API 中间商付费，数据也不经过第三方。
+账号页可切「聊天转发后端」：`Trae` / `Qoder` / `自动`（默认自动——有 Trae 账号就走 Trae，
+只登了 Qoder 才走 Qoder，老用户行为不变）。
 
 ## 功能一览
 
 - **OpenAI 兼容**：`/v1/chat/completions`（流式 SSE / 非流式 JSON / 工具调用）、`/v1/models`、`/healthz`
-- **多账号**：同时保存多个 Trae 国服账号，一键切换；当前账号 token 失效或限流时**自动换号重试**
+- **双后端**：`Trae` 与 `Qoder` 都能当聊天上游，账号页一键切换（`自动` 按已登录账号决定）；
+  Qoder 走 COSY `/algo/` 签名链路（自定义 base64 + 三段交换 + MD5 签名 + AES/RSA 运行时字段）
+- **多账号**：同时保存多个 Trae 国服 / 国际账号与多个 Qoder 账号，一键切换；
+  当前账号 token 失效或限流时**自动换号重试**
 - **Token 自动续期**：refresh token 轮换续期，长期使用不需要反复登录
 - **签到与积分**：一键签到**全部账号**（逐个签，不只当前那个）；可开每日定时签到（默认关，
   到点自动签，没跑成则下次打开 App 自动补签，成功有通知）；积分与用量按模型统计
-- **模型表**：从上游拉真实模型清单，本地持久化，重启不丢，客户端随时可拉
+- **模型表**：Trae 从上游拉真实模型清单并本地持久化（重启不丢）；Qoder 用内置 16 个模型目录
 - **保活**：前台服务 + 常驻通知 + 唤醒锁 + 看门狗闹钟 + 划掉任务自动拉回；有保活体检面板
 - **省心**：打开 App 自动启动服务（手动停止过则尊重你的选择）；改了亮暗主题与多配色风格
 - **局域网可用**：服务监听 `0.0.0.0`，同一 WiFi 下的其它设备也能连（概览页直接给出该填的地址）
@@ -50,6 +55,7 @@
 
 1. 安装 `out/` 目录最新的 apk，打开 App；
 2. 「账号」页 → 复制国服登录链接 → 浏览器登录 Trae → 把回调链接粘回 App；
+   （只想用 Qoder：在「Qoder 账号」卡粘贴 `pt-` 开头的 PAT，再把「聊天转发后端」切到 Qoder）
 3. 回「概览」页确认服务显示「运行中」（通常已自动启动）；
 4. 把 `http://127.0.0.1:8787/v1`（同机客户端）或概览页显示的局域网地址
    `http://<本机IP>:8787/v1`（同 WiFi 的其它设备）和概览页的 API Key 填进你的客户端。

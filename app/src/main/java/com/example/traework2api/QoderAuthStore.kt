@@ -26,8 +26,10 @@ import javax.crypto.spec.GCMParameterSpec
  *   q_acc_<uid>_pat / _jt / _jrt → 三类凭据密文
  *   q_active_uid             → 当前选中的 Qoder 账号 uid
  *
- * ⚠️ Qoder 账号目前**只用于积分检测 / 换号 / 导出导入**，不参与本 App 的 OpenAI 转发
- * （转发仍是 Trae；Qoder 聊天需要 COSY 签名，未接入）。故它不参与 [Gateway] 的 credProvider。
+ * ⚠️ Qoder 账号**既参与积分检测，也可以作为本地聊天转发的后端**（见 [QoderUpstream]）。
+ * 聊天走 COSY `/algo/` 签名链路，需要 `organization_id` / `organization_tags` /
+ * `data_policy_agreed` 这三样身份材料，所以它们也随索引一起持久化（都是非敏感字段）。
+ * 默认后端仍是 Trae，用户在 Qoder 账号页显式切换后才走 Qoder（见 [GatewayBackend]）。
  */
 object QoderAuthStore {
 
@@ -37,6 +39,9 @@ object QoderAuthStore {
 
     private const val KEY_INDEX = "qoder_accounts"
     private const val KEY_ACTIVE = "q_active_uid"
+
+    /** 持久化的机器标识（COSY 头 `Cosy-MachineId` 用）。 */
+    private const val KEY_MACHINE_ID = "q_machine_id"
 
     /** 导出 JSON 的格式标识。 */
     const val EXPORT_FORMAT = "traework2api-qoder-accounts"
@@ -48,6 +53,12 @@ object QoderAuthStore {
         val email: String,
         val mode: String,      // "cn" | "global"
         val expiresAt: Long,   // jobToken 到期，unix **毫秒**；0=未知
+        // ---- COSY 聊天签名所需的身份材料（非敏感，随索引明文存）----
+        val organizationId: String = "",
+        val organizationName: String = "",
+        val organizationTags: List<String> = emptyList(),
+        val dataPolicyAgreed: Boolean = false,
+        val isDataPolicyModifiable: Boolean = true,
     )
 
     /** Qoder 账号完整凭证（内存中才有 token）。 */
@@ -60,8 +71,20 @@ object QoderAuthStore {
         val name: String,
         val email: String,
         val mode: String,
+        // ---- COSY 聊天签名所需的身份材料 ----
+        val organizationId: String = "",
+        val organizationName: String = "",
+        val organizationTags: List<String> = emptyList(),
+        val dataPolicyAgreed: Boolean = false,
+        val isDataPolicyModifiable: Boolean = true,
     ) {
-        fun toMeta() = QMeta(uid, name, email, mode, expiresAt)
+        fun toMeta() = QMeta(
+            uid, name, email, mode, expiresAt,
+            organizationId, organizationName, organizationTags, dataPolicyAgreed, isDataPolicyModifiable,
+        )
+
+        /** 是否具备走 COSY 聊天的最小条件（uid + jobToken 必须有）。 */
+        val chatReady: Boolean get() = uid.isNotBlank() && jobToken.isNotBlank()
     }
 
     fun list(context: Context): List<QMeta> = readIndex(context)
@@ -80,6 +103,23 @@ object QoderAuthStore {
 
     fun load(context: Context): QCred? = activeUid(context)?.let { loadByUid(context, it) }
 
+    /**
+     * 机器标识（COSY 聊天头 `Cosy-MachineId`）。
+     *
+     * 为什么必须**持久且稳定**：上游把 machine_id 当作设备身份的一部分，
+     * 每次请求都换一个新值等于"每次都是新设备"，容易被风控盯上；而且参考实现的
+     * 凭据加密密钥也取它前 16 字符，变了就解不开旧凭据。
+     * 首次访问生成 UUID 并落盘（明文即可 —— 它不是密钥，只是个标识）。
+     */
+    @Synchronized
+    fun machineId(context: Context): String {
+        val p = prefs(context)
+        p.getString(KEY_MACHINE_ID, null)?.takeIf { it.length >= 16 }?.let { return it }
+        val id = java.util.UUID.randomUUID().toString()
+        p.edit().putString(KEY_MACHINE_ID, id).apply()
+        return id
+    }
+
     fun loadByUid(context: Context, uid: String): QCred? {
         val p = prefs(context)
         val meta = readIndex(context).firstOrNull { it.uid == uid } ?: return null
@@ -88,7 +128,11 @@ object QoderAuthStore {
         val jt = dec(jtKey(uid))
         val jrt = dec(jrtKey(uid))
         if (pat.isBlank() && jt.isBlank()) return null
-        return QCred(pat, jt, jrt, meta.expiresAt, meta.uid, meta.name, meta.email, meta.mode)
+        return QCred(
+            pat, jt, jrt, meta.expiresAt, meta.uid, meta.name, meta.email, meta.mode,
+            meta.organizationId, meta.organizationName, meta.organizationTags,
+            meta.dataPolicyAgreed, meta.isDataPolicyModifiable,
+        )
     }
 
     /** 保存（新增或更新）一个账号并设为当前账号。 */
@@ -138,6 +182,11 @@ object QoderAuthStore {
             arr.put(JSONObject()
                 .put("uid", c.uid).put("name", c.name).put("email", c.email).put("mode", c.mode)
                 .put("expiresAt", c.expiresAt)
+                .put("organizationId", c.organizationId)
+                .put("organizationName", c.organizationName)
+                .put("organizationTags", JSONArray().apply { c.organizationTags.forEach { put(it) } })
+                .put("dataPolicyAgreed", c.dataPolicyAgreed)
+                .put("isDataPolicyModifiable", c.isDataPolicyModifiable)
                 .put("pat", c.pat).put("jobToken", c.jobToken).put("jobRefreshToken", c.jobRefreshToken))
         }
         return JSONObject()
@@ -163,6 +212,11 @@ object QoderAuthStore {
                 expiresAt = o.optLong("expiresAt", 0L), uid = uid,
                 name = o.optString("name", ""), email = o.optString("email", ""),
                 mode = o.optString("mode", QoderAuthApi.MODE_CN),
+                organizationId = o.optString("organizationId", ""),
+                organizationName = o.optString("organizationName", ""),
+                organizationTags = jsonToStringList(o.opt("organizationTags")),
+                dataPolicyAgreed = o.optBoolean("dataPolicyAgreed", false),
+                isDataPolicyModifiable = o.optBoolean("isDataPolicyModifiable", true),
             )
             val p = prefs(context)
             p.edit()
@@ -195,8 +249,18 @@ object QoderAuthStore {
             (0 until arr.length()).mapNotNull { i ->
                 val o = arr.optJSONObject(i) ?: return@mapNotNull null
                 val uid = o.optString("uid", "").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                QMeta(uid, o.optString("name", ""), o.optString("email", ""),
-                    o.optString("mode", QoderAuthApi.MODE_CN), o.optLong("expiresAt", 0L))
+                QMeta(
+                    uid = uid,
+                    name = o.optString("name", ""),
+                    email = o.optString("email", ""),
+                    mode = o.optString("mode", QoderAuthApi.MODE_CN),
+                    expiresAt = o.optLong("expiresAt", 0L),
+                    organizationId = o.optString("organizationId", ""),
+                    organizationName = o.optString("organizationName", ""),
+                    organizationTags = jsonToStringList(o.opt("organizationTags")),
+                    dataPolicyAgreed = o.optBoolean("dataPolicyAgreed", false),
+                    isDataPolicyModifiable = o.optBoolean("isDataPolicyModifiable", true),
+                )
             }
         } catch (_: Exception) { emptyList() }
     }
@@ -204,8 +268,20 @@ object QoderAuthStore {
     private fun toJson(metas: List<QMeta>): JSONArray = JSONArray().apply {
         metas.forEach { m ->
             put(JSONObject().put("uid", m.uid).put("name", m.name).put("email", m.email)
-                .put("mode", m.mode).put("expiresAt", m.expiresAt))
+                .put("mode", m.mode).put("expiresAt", m.expiresAt)
+                .put("organizationId", m.organizationId)
+                .put("organizationName", m.organizationName)
+                .put("organizationTags", JSONArray().apply { m.organizationTags.forEach { put(it) } })
+                .put("dataPolicyAgreed", m.dataPolicyAgreed)
+                .put("isDataPolicyModifiable", m.isDataPolicyModifiable))
         }
+    }
+
+    /** 索引里的标签既可能是数组也可能是逗号串（旧版本/手工编辑），两种都吃。 */
+    private fun jsonToStringList(raw: Any?): List<String> = when (raw) {
+        is JSONArray -> (0 until raw.length()).mapNotNull { raw.optString(it, "").takeIf { s -> s.isNotBlank() } }
+        is String -> raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        else -> emptyList()
     }
 
     private fun writeMeta(context: Context, meta: QMeta) {
@@ -251,15 +327,46 @@ object QoderAuthStore {
         } catch (_: Exception) { null }
     }
 
-    /** 纯计算自检：索引 JSON 往返无损（uid 是主键）。 */
+    /** 纯计算自检：索引 JSON 往返无损（uid 是主键），**含 COSY 聊天所需的组织字段**。 */
     fun selfCheck() {
-        val src = listOf(QMeta("q-1", "张三", "a@b.com", QoderAuthApi.MODE_CN, 1791341100000L))
+        val src = listOf(
+            QMeta("q-1", "张三", "a@b.com", QoderAuthApi.MODE_CN, 1791341100000L),
+            QMeta(
+                "q-2", "李四", "c@d.com", QoderAuthApi.MODE_GLOBAL, 1791341100001L,
+                organizationId = "org-9", organizationName = "示例组织",
+                organizationTags = listOf("team-a", "team-b"),
+                dataPolicyAgreed = true, isDataPolicyModifiable = false,
+            ),
+        )
         val arr = toJson(src)
         val back = (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
-            QMeta(o.getString("uid"), o.getString("name"), o.getString("email"),
-                o.getString("mode"), o.getLong("expiresAt"))
+            QMeta(
+                uid = o.getString("uid"), name = o.getString("name"), email = o.getString("email"),
+                mode = o.getString("mode"), expiresAt = o.getLong("expiresAt"),
+                organizationId = o.optString("organizationId", ""),
+                organizationName = o.optString("organizationName", ""),
+                organizationTags = jsonToStringList(o.opt("organizationTags")),
+                dataPolicyAgreed = o.optBoolean("dataPolicyAgreed", false),
+                isDataPolicyModifiable = o.optBoolean("isDataPolicyModifiable", true),
+            )
         }
-        check(back == src) { "自检失败：Qoder 账号索引往返不一致" }
+        check(back == src) { "自检失败：Qoder 账号索引往返不一致（组织字段丢了会让聊天签名 401）" }
+        check(back[1].organizationTags == listOf("team-a", "team-b")) { "自检失败：组织标签往返丢失" }
+        check(back[1].dataPolicyAgreed) { "自检失败：data_policy_agreed 往返丢失" }
+
+        // 旧索引（无组织字段）必须能读出默认值，不能整条丢弃
+        val legacy = JSONArray("""[{"uid":"old","name":"n","email":"e","mode":"cn","expiresAt":1}]""")
+        val legacyMeta = (0 until legacy.length()).map { i ->
+            val o = legacy.getJSONObject(i)
+            QMeta(o.getString("uid"), o.optString("name"), o.optString("email"),
+                o.optString("mode"), o.optLong("expiresAt"),
+                o.optString("organizationId", ""), o.optString("organizationName", ""),
+                jsonToStringList(o.opt("organizationTags")),
+                o.optBoolean("dataPolicyAgreed", false), o.optBoolean("isDataPolicyModifiable", true))
+        }
+        check(legacyMeta.size == 1 && legacyMeta[0].organizationTags.isEmpty()) {
+            "自检失败：旧版索引应兼容读出（组织字段取默认值）"
+        }
     }
 }

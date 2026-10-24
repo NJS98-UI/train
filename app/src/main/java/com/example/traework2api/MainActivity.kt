@@ -230,6 +230,13 @@ class MainActivity : Activity() {
         TraeUpstream.selfCheck()
         // 模型表自检：空表绝不允许生效 —— 那会让所有客户端看不到任何模型（本任务最贵的失败面）。
         ModelsRepo.selfCheck()
+        // COSY 签名原语自检：编码/换行/填充/UUID 掩码/RSA 长度错一个都只会得到 401，
+        // 且上游不告诉你哪步错 —— 必须在本地就钉死。
+        QoderCosyCrypto.selfCheck()
+        // Qoder 模型目录 + 解析器自检：模型名解析错会把请求路由到错的 key。
+        QoderModelCatalog.selfCheck()
+        // Qoder 上游请求体自检：system 抽取、tool_calls 的 content、cache 标记、参数透传。
+        QoderUpstream.selfCheck()
         // 装入磁盘模型缓存（必须在 selfCheck 之后、任何 /v1/models 请求之前）：
         // 客户端在 App 刚重启、还没手动刷模型时也能拉到上次刷到的清单。
         ModelsRepo.init(this)
@@ -241,6 +248,9 @@ class MainActivity : Activity() {
         TraeAuthStore.syncRegionToActiveAccount(this)
         // 本地 API Key 稳定性自检：key 一旦"每次取值都变"，所有已配置的客户端全 401。
         Gateway.selfCheck(this)
+        // 后端选择自检：auto 在"只登 Qoder"时必须解析成 Qoder，否则聊天会拿空 Trae 凭证。
+        // 必须放在区域恢复之后：TraeAuthStore.load 的结果参与 auto 判定。
+        GatewayBackend.selfCheck(this)
         // 保活页的 ROM 识别自检：SystemProperties 是隐藏 API（靠反射），读不到也不能崩。
         KeepAlive.selfCheck()
 
@@ -700,13 +710,47 @@ class MainActivity : Activity() {
 
         // ---- Qoder 账号 ----
         addView(section("Qoder 账号"))
+
+        // ---- 聊天转发后端（Trae / Qoder）----
+        // 放在账号卡之前：用户看到"能不能转发"是第一诉求，账号细节是第二层。
+        run {
+            val now = GatewayBackend.resolved(this@MainActivity)
+            val isQ = now == GatewayBackend.QODER
+            addView(card(tone = CardTone.SOFT) {
+                addView(row {
+                    addView(text("聊天转发后端", FS_CARD_TITLE, true), weighted())
+                    addView(chipInfo(GatewayBackend.label(now)))
+                })
+                addView(caption(
+                    if (isQ) "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Qoder**（COSY 签名链路），" +
+                        "模型表用内置的 ${QoderModelCatalog.ALL.size} 个；不需要 Trae 登录。"
+                    else "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Trae**（solo_work_remote），" +
+                        "模型表来自「模型」页刷新；Qoder 账号此刻不参与转发（要转发点下面的按钮切后端）。"
+                ), top(6))
+                addView(row(8) {
+                    addView(action(if (isQ) "切到 Trae" else "切到 Qoder", outlined = true) {
+                        GatewayBackend.set(this@MainActivity,
+                            if (isQ) GatewayBackend.TRAE else GatewayBackend.QODER)
+                        toast("转发后端已切到 ${GatewayBackend.label(GatewayBackend.resolved(this@MainActivity))}")
+                        render(currentPage)
+                    }, weighted())
+                    addView(action("自动选择", outlined = true) {
+                        GatewayBackend.set(this@MainActivity, GatewayBackend.AUTO)
+                        toast("转发后端：自动（有 Trae 走 Trae，否则有 Qoder 走 Qoder）")
+                        render(currentPage)
+                    }, weighted(start = 8))
+                }, top(10))
+            })
+        }
+
         val qMetas = QoderAuthStore.list(this@MainActivity)
         val qActive = QoderAuthStore.activeUid(this@MainActivity)
         if (qMetas.isEmpty()) {
             addView(card(tone = CardTone.SOFT) {
                 addView(text("未添加 Qoder 账号", FS_CARD_TITLE, true))
                 addView(caption("Qoder 用「个人访问令牌 PAT」登录：在 Qoder 账号集成页创建 pt- 令牌后粘贴到" +
-                    "国内/国际版对应区域。当前仅纳入积分检测 / 换号 / 导出导入，不做聊天转发。"), top(6))
+                    "国内/国际版对应区域。登录后**可作本地聊天转发后端**（COSY 签名链路），" +
+                    "也可只用来查积分/领 Credits。"), top(6))
                 addView(action("粘贴 PAT 登录", full = true) { promptQoderPat() }, top(14))
             })
         } else {
@@ -1160,7 +1204,7 @@ class MainActivity : Activity() {
         // 刷新按钮 + 计数。计数是"刷新真的起作用了"的证据 —— 否则点了没新增时用户会以为没生效。
         val countView = caption("")
         fun refreshCountLabel() {
-            countView.text = "已加载 · ${ModelsRepo.current().length()} 个模型"
+            countView.text = "已加载 · ${GatewayBackend.modelsFor(this@MainActivity).length()} 个模型"
         }
         val refreshBtn = action(REFRESH_MODELS_LABEL) { refreshModels() }
         // 刷新中：按钮置灰 + 文案变「刷新中…」（照抄记录页/积分刷新那套，别新造轮子）
@@ -1208,7 +1252,7 @@ class MainActivity : Activity() {
         }
         /** 未加载时藏起搜索框/工具条/列表，只留说明卡；加载后反过来。 */
         fun applyLoadedState() {
-            val loaded = ModelsRepo.isDynamic
+            val loaded = GatewayBackend.modelsLoaded(this@MainActivity)
             notLoaded.visibility = if (loaded) View.GONE else View.VISIBLE
             edit.visibility = if (loaded) View.VISIBLE else View.GONE
             toolbar.visibility = if (loaded) View.VISIBLE else View.GONE
@@ -1239,7 +1283,7 @@ class MainActivity : Activity() {
     /** 用当前内存模型表构建卡片；返回 (匹配词→View) 供过滤。 */
     private fun buildModelCards(container: LinearLayout): HashMap<String, View> {
         val cards = HashMap<String, View>()
-        val arr = ModelsRepo.current()
+        val arr = GatewayBackend.modelsFor(this)
         for (i in 0 until arr.length()) {
             val m = arr.optJSONObject(i) ?: continue
             val id = m.optString("id", "")
@@ -1261,7 +1305,8 @@ class MainActivity : Activity() {
             }, weighted())
             addView(linkAction("复制") { copyModelId(id) })
         })
-        addView(caption("context ${m.optInt("context_length", 0)} · trae-solo"), top(4))
+        val backendTag = if (GatewayBackend.isQoder(this)) "qoder" else "trae-solo"
+        addView(caption("context ${m.optInt("context_length", 0)} · $backendTag"), top(4))
     }
 
     private fun copyModelId(id: String) = copyToClipboard("modelId", id, "已复制模型 ID: $id")
@@ -1938,6 +1983,13 @@ class MainActivity : Activity() {
      * 客户端拿到的仍是上次刷到的清单，所以只打日志，绝不能打扰用户。
      */
     private fun refreshModels(quiet: Boolean = false) {
+        // Qoder 后端的模型目录是**内置**的（协议要求，见 QoderModelCatalog），
+        // 没有"从上游拉表"这回事：点刷新只需重画，别拿 Trae 的 token 去打 Trae 的接口。
+        if (GatewayBackend.isQoder(this)) {
+            modelsRefreshApply?.invoke()
+            if (!quiet) toast("Qoder 模型目录为内置清单（${QoderModelCatalog.ALL.size} 个），无需刷新")
+            return
+        }
         val cred = TraeAuthStore.load(this)
         if (cred == null || cred.accessToken.isBlank()) {
             if (!quiet) toast("未登录 Trae，请先登录")

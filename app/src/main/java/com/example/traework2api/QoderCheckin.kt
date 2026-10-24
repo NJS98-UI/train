@@ -141,7 +141,8 @@ object QoderCheckin {
 
     /**
      * 对全部已保存 Qoder 账号领取每日 Credits。**阻塞** —— 必须在后台线程跑。
-     * Qoder 不参与转发，故不加 [Gateway.locked]。结果持久化并把 last_run_date 记为今天。
+     * 签到走 OpenAPI、与网关的聊天链路互不影响，故不加 [Gateway.locked]。
+     * 结果持久化并把 last_run_date 记为今天。
      */
     fun runAll(ctx: Context): BatchResult {
         val raw = QoderAuthApi.claimDailyAll(ctx)
