@@ -500,8 +500,18 @@ object QoderAuthApi {
             return QClaimResult("fail", 0, "拉取活动失败：${e.message ?: e.javaClass.simpleName}")
         }
         val claimable = campaigns.filter { it.claimable }
-        if (claimable.isEmpty())
-            return QClaimResult("already", 0, "今日无可领活动（可能已领或未到 10:00 领取窗口）")
+        if (claimable.isEmpty()) {
+            // 国际版没有「每天领」活动是**平台硬限制**，不是我们没做对：
+            // 该活动只下发给带原生设备标识（Cosy-MachineToken，阿里 umid 原生 SDK 产出、
+            // 仅 Qoder 桌面端/CLI 能生成）的请求；手机端伪造不出来，服务端会 200 但把活动隐藏。
+            // 所以这里必须如实说清楚，不能写成"可能已领" —— 那会让人以为明天再来就有了。
+            val why = if (cred.mode == MODE_GLOBAL) {
+                "国际版每日领取仅桌面端可领（缺原生设备标识），手机端看不到该活动"
+            } else {
+                "今日无可领活动（可能已领或未到 10:00 领取窗口）"
+            }
+            return QClaimResult("already", 0, why)
+        }
         var total = 0L
         var fresh = 0
         var lastErr: String? = null
