@@ -8,6 +8,26 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.1] - 2026-10-17
+
+### Fixed
+- **campaigns 恒为空的真正原因：`Cosy-ClientType` 被写成了 5**。用真实国际版账号做单变量对照
+  （同一 jobToken，只改请求头）：
+
+  | 请求头 | showCampaign | 活动数 |
+  |---|---|---|
+  | ClientType 5 + 全套 machine* | false | 0 |
+  | ClientType 10 + **不发**任何 machine* | **true** | 2 |
+  | ClientType 10 + Version 1.0.1 / 1.1.69 | true | 2 |
+
+  结论：**服务端不校验 machine token，开关是 `Cosy-ClientType: 10`**。0.7.0 里
+  `applyMachineHeaders` 用 `CLIENT_TYPE = "5"` 把基础头覆盖回去，等于自己把活动列表关了。
+- 文案：账号有活动但全是查看类（VIEW_DETAILS，不发 Credits）时，不再说"无可见活动"。
+
+### Changed
+- `QoderMachine.COSY_VERSION = 1.1.69` / `CLIENT_TYPE = 10`（实测版本不影响下发，取桌面端常用值）。
+- 机器身份降级为"与官方无 umid 客户端对齐"，不再是开门钥匙；抓包指纹仍可回填覆盖。
+
 ## [0.7.0] - 2026-10-17
 
 ### Added

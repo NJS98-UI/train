@@ -20,16 +20,32 @@ import java.util.UUID
  * 并且 `MachineType` / `MachineCode` 留空。我们照抄这一条，服务端看到的就与官方
  * 「无 umid 的桌面端」完全同构，而不是一个明显自造的哈希串。
  *
- * 注意：真·umid token（`Cosy-MachineToken` 为原生 SDK 签发的那串）优先级更高，
- * 用户抓包回填时走 [QoderAuthStore.fingerprint]；本类只是**没有真货时的等价身份**。
+ * ⚠️ 2026-10-24 实测修正：服务端**并不校验** machine token —— 同一个 jobToken，只发
+ * `Cosy-ClientType: 10` 而不发任何 machine* 头，campaigns 照样下发；发 `ClientType: 5`
+ * 则恒为空。所以本类的真正职责是**保证 ClientType/Version 是桌面端那套**，机器身份只是
+ * 顺带对齐官方客户端（无 umid 时的等价形态），不是开门的钥匙。
+ *
+ * 真·umid token 仍可经 [QoderAuthStore.fingerprint] 抓包回填（优先级更高），
+ * 但那是锦上添花，不是必需。
  */
 object QoderMachine {
 
-    /** Cosy-Version：CLI 里 `aog = bJ || "1.1.78"`。 */
-    const val COSY_VERSION = "1.1.78"
+    /**
+     * Cosy-Version / Cosy-ClientType —— **campaigns 能不能下发就看这两个**。
+     *
+     * 2026-10-24 用真实国际版账号做的单变量对照（同一个 jobToken，只改头）：
+     * ```
+     * ClientType 5  + 任意 machine* 头  → showCampaign=false, campaigns=[]
+     * ClientType 10 + 不发任何 machine* 头 → showCampaign=true, 2 条活动 ✅
+     * ClientType 10 + 版本 1.0.1 或 1.1.69 → 都是 true（版本不影响）
+     * ```
+     * 结论：**决定性因素是 ClientType=10，服务端并不校验 machine token**。
+     * 之前把 ClientType 写成 5（CLI 里 `A ? "6" : "5"` 的默认分支）就是把活动列表整个关掉的原因。
+     */
+    const val COSY_VERSION = "1.1.69"
 
-    /** Cosy-ClientType：CLI 里 `A ? "6" : "5"`，默认走 5。 */
-    const val CLIENT_TYPE = "5"
+    /** 必须 10：实测 5 时 campaigns 恒为空。 */
+    const val CLIENT_TYPE = "10"
 
     /** Cosy-MachineOS：CLI 里 `${arch}_${platform}`，桌面端典型值。 */
     const val MACHINE_OS = "aarch64_darwin"
