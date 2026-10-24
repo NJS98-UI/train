@@ -20,6 +20,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.NumberPicker
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
@@ -119,7 +120,7 @@ class MainActivity : Activity() {
 
     private enum class Page(val title: String, val subtitle: String, val icon: Int) {
         OVERVIEW("概览", "本地服务运行状态", R.drawable.ic_dashboard),
-        ACCOUNT("账号", "当前 Trae 登录状态", R.drawable.ic_account),
+        ACCOUNT("账号", "账户登录状态", R.drawable.ic_account),
         MODELS("模型", "本地可用的模型表", R.drawable.ic_models),
         RECORDS("记录", "调用用量与记录", R.drawable.ic_history),
     }
@@ -158,8 +159,8 @@ class MainActivity : Activity() {
     private var qoderRemaining: Double? = null
     /** Qoder 每日 Credits 领取进行中（手动，挡住重复点击）。 */
     private var qoderClaimBusy = false
-    /** 本次进程是否已尝试过定时补签（避免每次回前台重复打上游；今天领没领由 maybeCatchUp 内部判定）。 */
-    private var qoderCatchUpTried = false
+    /** 本次进程是否已尝试过启动补签（真正的"每天一次"由 AutoCheckin 落盘判定）。 */
+    private var autoCheckinTried = false
     /** 「积分与用量」/「Qoder 账号」卡里会被监测器原地刷新的控件。 */
     private var monitorApply: (() -> Unit)? = null
 
@@ -271,6 +272,8 @@ class MainActivity : Activity() {
         QoderModelCache.selfCheck()
         // 装入按账号积分缓存：进账号页立刻有数，后台刷新再原地更新。
         AccountCredits.loadCache(this)
+        // 启动补签的日期闸门自检（写错就变成"每次前台都签"，会一直打上游）。
+        AutoCheckin.selfCheck()
         // 保活页的 ROM 识别自检：SystemProperties 是隐藏 API（靠反射），读不到也不能崩。
         KeepAlive.selfCheck()
 
@@ -593,10 +596,7 @@ class MainActivity : Activity() {
                 }
             })
             // 第二件：横起来的账户选择（点开弹窗，一排一个账号）
-            addView(accountBar(
-                title = traeCred?.nickname?.ifBlank { null } ?: "选择账号",
-                subtitle = traeCred?.let { regionLabel(it.region) + " · " + traeCreditText(it.uid) } ?: "",
-            ) { showTraeAccountPicker() }, top(8))
+            addView(accountBar("账户选择") { showTraeAccountPicker() }, top(8))
         }
         addView(row(8) {
             addView(action("登录账号") { startTraeLogin() }, weighted())
@@ -627,13 +627,7 @@ class MainActivity : Activity() {
                 addView(caption("积分"), top(10))
                 addView(qoderCreditView!!, top(2))
             })
-            addView(accountBar(
-                title = qActiveMeta?.name?.ifBlank { null } ?: "选择账号",
-                subtitle = qActiveMeta?.let {
-                    (if (it.mode == QoderAuthApi.MODE_GLOBAL) "国际版" else "国内版") + " · " +
-                        qoderCreditText(it.uid)
-                } ?: "",
-            ) { showQoderAccountPicker() }, top(8))
+            addView(accountBar("账户选择") { showQoderAccountPicker() }, top(8))
         }
         // 添加 Qoder 账号：两个按钮（登录跳浏览器 / 回填令牌）
         addView(row(8) {
@@ -747,20 +741,16 @@ class MainActivity : Activity() {
     // 账号页的交互零件
     // ------------------------------------------------------------------
 
-    /** 横向账户选择条：点一下弹窗选账号（一排一个，当前账号后打绿勾）。 */
-    private fun accountBar(title: String, subtitle: String, onClick: () -> Unit): View =
+    /** 横向账户选择条：**只写「账户选择」**（不显示账号名，账号在弹窗里选）。 */
+    private fun accountBar(title: String, onClick: () -> Unit): View =
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = shape("surface", RADIUS_CARD, "outline_variant")
             isClickable = true
             setOnClickListener { onClick() }
-            setPadding(dp(CARD_PAD), dp(14), dp(CARD_PAD), dp(14))
-            addView(LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(text(title, FS_VALUE, true))
-                if (subtitle.isNotBlank()) addView(caption(subtitle), top(2))
-            }, weighted())
+            setPadding(dp(CARD_PAD), dp(16), dp(CARD_PAD), dp(16))
+            addView(text(title, FS_VALUE, true), weighted())
             addView(text("\u25BE", FS_CARD_TITLE, true, "on_surface_variant"))
         }
 
@@ -872,29 +862,42 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 定时领取时间：自定义输入 HH:mm（不固定档位）。 */
+    /**
+     * 定时领取时间：**上下滑动**选小时与分钟（不手打）。
+     *
+     * 用两个 [NumberPicker] 而不是输入框：手打要处理 "8:5" / "08：05" / 全角冒号等一堆脏输入，
+     * 而滚轮天然只有合法值，滑到哪就是哪。
+     */
     private fun promptCustomTime() {
-        val edit = EditText(this).apply {
-            hint = "HH:mm"
-            isSingleLine = true
-            inputType = InputType.TYPE_CLASS_DATETIME
-            setText(QoderCheckin.timeText(this@MainActivity))
-            setTextColor(color("on_surface"))
-            setHintTextColor(color("on_surface_variant"))
-            background = shape("surface_container", RADIUS_CONTROL)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
+        val cur = QoderCheckin.timeText(this@MainActivity).split(":")
+        val h0 = cur.getOrNull(0)?.toIntOrNull()?.coerceIn(0, 23) ?: 8
+        val m0 = cur.getOrNull(1)?.toIntOrNull()?.coerceIn(0, 59) ?: 0
+        val hourPicker = NumberPicker(this@MainActivity).apply {
+            minValue = 0
+            maxValue = 23
+            value = h0
+            wrapSelectorWheel = true
+        }
+        val minPicker = NumberPicker(this@MainActivity).apply {
+            minValue = 0
+            maxValue = 59
+            value = m0
+            wrapSelectorWheel = true
+        }
+        val panel = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            addView(hourPicker, lp(0, -2).also { it.weight = 1f })
+            addView(text(":", FS_TITLE, true), lp(-2, -2, start = 6, end = 6))
+            addView(minPicker, lp(0, -2).also { it.weight = 1f })
         }
         confirmDialog(
             title = "定时领取时间",
             message = "",
             okText = "确定",
-            content = edit,
+            content = panel,
         ) {
-            val t = edit.text?.toString()?.trim().orEmpty()
-            if (!Regex("^([01]?\\d|2[0-3]):[0-5]\\d$").matches(t)) {
-                toast("时间格式应为 HH:mm")
-                return@confirmDialog
-            }
+            val t = String.format(Locale.US, "%02d:%02d", hourPicker.value, minPicker.value)
             if (QoderCheckin.isEnabled(this@MainActivity)) {
                 QoderCheckin.enable(this@MainActivity, t)
             } else {
@@ -2411,16 +2414,17 @@ class MainActivity : Activity() {
         CreditMonitor.listener = CreditMonitor.Listener { s -> applyMonitorSnapshot(s) }
         // 进页面先回填上一次快照，避免要等最多 2 秒才出数。
         CreditMonitor.currentSnapshot()?.let { applyMonitorSnapshot(it) }
-        // Qoder 定时补签：开关开着但闹钟没跑成（进程被杀/重启无 BOOT 自启）时，进 App 补领一轮。
-        // 每次进程只尝试一次；今天是否真跑由 maybeCatchUp 内部按 last_run_date/allOk 判定。
-        if (!qoderCatchUpTried && QoderCheckin.isEnabled(this) && QoderAuthStore.activeUid(this) != null) {
-            qoderCatchUpTried = true
-            thread(name = "qoder-catchup") {
-                val ran = runCatching { QoderCheckin.maybeCatchUp(this) }.getOrDefault(false)
-                if (ran) runOnUiThread {
+        // 启动补签：**全部平台、全部账号**，当天没签的都补上（每天只跑一次）。
+        // 定时签到靠 AlarmManager，进程被杀/手机重启后闹钟不会自己回来，所以进 App 必须兜一次。
+        if (!autoCheckinTried) {
+            autoCheckinTried = true
+            thread(name = "auto-checkin") {
+                val summary = runCatching { AutoCheckin.runAllOnce(this) }.getOrNull()
+                if (summary != null) runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     qoderRemaining = null
                     CreditMonitor.stale = true
+                    toast("已自动补签：$summary")
                     render(currentPage)
                 }
             }
