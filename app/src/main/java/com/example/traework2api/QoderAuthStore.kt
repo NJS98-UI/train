@@ -390,8 +390,8 @@ object QoderAuthStore {
     fun selfCheck() {
         // 指纹编解码往返：抓来的 token 很长且含 base64url 字符，拼错一个字符就等于换设备
         val fp = QFingerprint("mid-123", "mtok_abc-DEF_456", "5", "aarch64_darwin", "localhost")
-        val back = decodeFingerprint(encodeFingerprint(fp))
-        check(back == fp) { "自检失败：设备指纹编解码不往返" }
+        val fpBack = decodeFingerprint(encodeFingerprint(fp))
+        check(fpBack == fp) { "自检失败：设备指纹编解码不往返" }
         check(decodeFingerprint("""{"id":"","tk":""}""") == null) { "自检失败：空指纹应为 null" }
         val src = listOf(
             QMeta("q-1", "张三", "a@b.com", QoderAuthApi.MODE_CN, 1791341100000L),

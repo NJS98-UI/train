@@ -278,7 +278,8 @@ object QoderAuthApi {
     fun fetchCredits(jt: String, mode: String): QCredits? {
         if (jt.isBlank()) return null
         return try {
-            var root = JSONObject(getForCampaigns(openApiBase(mode) + EP_USAGE, jt))
+            // 用量查询是普通鉴权接口，不需要机器身份（传 null 即不带头）
+            var root = JSONObject(getForCampaigns(openApiBase(mode) + EP_USAGE, jt, mode, null))
             // 部分返回把内容裹在 data 下；探测不到已知键时再解一层。
             if (!root.has("userQuota") && !root.has("personalQuota") &&
                 !root.has("isQuotaExceeded") && root.has("data")
