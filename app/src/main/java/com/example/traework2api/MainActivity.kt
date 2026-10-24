@@ -941,16 +941,20 @@ class MainActivity : Activity() {
     private fun qoderClaimToast(r: QoderAuthApi.QClaimResult): String = when (r.status) {
         "ok" -> "领取成功 +${r.amount} Credits"
         "already" -> r.message.ifBlank { "今日已领取" }
-        "unsupported" -> "国际版暂不支持自动领取：${r.message}"
+        "unsupported" -> r.message
         else -> "领取失败：${r.message}"
     }
 
     private fun qoderBatchClaimToast(items: List<Pair<String, QoderAuthApi.QClaimResult>>): String {
         if (items.isEmpty()) return "没有 Qoder 账号"
         val ok = items.filter { it.second.status == "ok" }
-        if (ok.isEmpty()) return "无可领额度（已领或不符）· 共 ${items.size} 个账号"
-        val total = ok.sumOf { it.second.amount }
-        return "${ok.size}/${items.size} 个账号领取成功，共 +$total Credits"
+        if (ok.isNotEmpty()) {
+            val total = ok.sumOf { it.second.amount }
+            return "${ok.size}/${items.size} 个账号领取成功，共 +$total Credits"
+        }
+        // 全无可领：若含国际版不支持，优先把原因说清楚。
+        val unsup = items.firstOrNull { it.second.status == "unsupported" }
+        return unsup?.second?.message ?: "无可领额度（已领或不符）· 共 ${items.size} 个账号"
     }
 
     /** 定时时刻在常用档位间循环（免输入框，够用即可）。 */

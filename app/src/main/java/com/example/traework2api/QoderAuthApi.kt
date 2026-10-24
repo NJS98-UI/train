@@ -1,7 +1,6 @@
 package com.example.traework2api
 
 import android.content.Context
-import android.util.Base64
 import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -130,17 +129,26 @@ object QoderAuthApi {
         val hasCredit: Boolean get() = !exceeded && remaining > 0.0
     }
 
-    /** 查积分余量（`quota/usage`）。失败/无 token 返回 null。 */
+    /** 查积分余量（`quota/usage`）。失败/无 token 返回 null。用 Cosy-ClientType:10 与桌面端一致。 */
     fun fetchCredits(jt: String, mode: String): QCredits? {
         if (jt.isBlank()) return null
         return try {
-            val o = JSONObject(getBearer(openApiBase(mode) + EP_USAGE, jt))
+            var root = JSONObject(getForCampaigns(openApiBase(mode) + EP_USAGE, jt, null))
+            // 部分返回把内容裹在 data 下；探测不到已知键时再解一层。
+            if (!root.has("userQuota") && !root.has("personalQuota") &&
+                !root.has("isQuotaExceeded") && root.has("data")
+            ) root.optJSONObject("data")?.let { root = it }
             var remaining = 0.0
-            o.optJSONObject("userQuota")?.let { remaining += it.optDouble("remaining", 0.0) }
-            o.optJSONObject("orgResourcePackage")?.let { org ->
-                if (org.optBoolean("available", true)) remaining += org.optDouble("remaining", 0.0)
+            // 个人 / 加购 / 组织额度分开返回，键名国内外有差异，逐个累加（拿到的都算进余量）。
+            for (k in listOf("userQuota", "personalQuota", "addOnQuota", "addonQuota", "extraQuota")) {
+                root.optJSONObject(k)?.let { remaining += it.optDouble("remaining", 0.0) }
             }
-            val exceeded = o.optBoolean("isQuotaExceeded", false)
+            for (k in listOf("orgResourcePackage", "organizationQuota")) {
+                root.optJSONObject(k)?.let { org ->
+                    if (org.optBoolean("available", true)) remaining += org.optDouble("remaining", 0.0)
+                }
+            }
+            val exceeded = root.optBoolean("isQuotaExceeded", false)
             QCredits(remaining = remaining.coerceAtLeast(0.0), exceeded = exceeded)
         } catch (e: Exception) {
             Log.w(TAG, "credits 查询失败: ${e.javaClass.simpleName}")
@@ -220,15 +228,15 @@ object QoderAuthApi {
         val ok: Boolean get() = status == "ok"
     }
 
-    /** GET 带 Bearer，可选携带设备 umid 头（国际版 campaigns 需要）。 */
+    /** GET 带 Bearer，可选携带设备标识头（国际版 campaigns 需 Cosy-MachineToken/MachineType）。 */
     private fun getForCampaigns(url: String, bearer: String, umid: String?): String {
         val req = Request.Builder().url(url).get()
             .header("Authorization", "Bearer $bearer")
             .header("Accept", JSON)
             .header("User-Agent", "traework2api")
             .header("Cosy-Version", "1.0.1")
-            .header("Cosy-ClientType", "5")
-            .apply { if (umid != null) header("umid", umid) }
+            .header("Cosy-ClientType", "10")
+            .apply { if (umid != null) header("Cosy-MachineToken", umid).header("Cosy-MachineType", "2") }
             .build()
         client.newCall(req).execute().use { r ->
             val text = r.body?.string().orEmpty()
@@ -246,8 +254,8 @@ object QoderAuthApi {
             .header("Accept", JSON)
             .header("User-Agent", "traework2api")
             .header("Cosy-Version", "1.0.1")
-            .header("Cosy-ClientType", "5")
-            .apply { if (umid != null) header("umid", umid) }
+            .header("Cosy-ClientType", "10")
+            .apply { if (umid != null) header("Cosy-MachineToken", umid).header("Cosy-MachineType", "2") }
             .build()
         client.newCall(req).execute().use { r ->
             val text = r.body?.string().orEmpty()
@@ -256,27 +264,21 @@ object QoderAuthApi {
         }
     }
 
-    /** 国际版 campaigns 需要客户端设备标识 umid。按 uid 确定性派生（同账号恒定、不同账号不撞）。 */
-    private fun umidFor(uid: String): String {
-        val seed = "qoder-umid:" + uid
-        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(seed.toByteArray())
-        return Base64.encodeToString(digest.copyOf(16), Base64.NO_WRAP or Base64.NO_PADDING)
-            .trim().replace("+", "-").replace("/", "_")
-    }
-
-    /** 拉取活动列表（可领的在里面）。解析见 [parseCampaigns]。 */
-    private fun fetchCampaigns(jt: String, mode: String, uid: String): List<QCampaign> {
-        val umid = if (mode == MODE_GLOBAL) umidFor(uid) else null
+    /**
+     * 拉取活动列表（可领的在里面）。解析见 [parseCampaigns]。
+     * 国际版 campaigns 需原生 Cosy-MachineToken（本 App 无法产出，见 [claimDailyForCred] 的前置判断），
+     * 故这里不再伪造设备标识头——假 token 无益且可能被判定篡改。
+     */
+    private fun fetchCampaigns(jt: String, mode: String): List<QCampaign> {
         val url = openApiBase(mode) + EP_CAMPAIGNS + "?forceRefresh=true"
-        val text = getForCampaigns(url, jt, umid)
+        val text = getForCampaigns(url, jt, null)
         return parseCampaigns(JSONObject(text))
     }
 
     /** 领一条活动。body 固定 {}（幂等）。返回本次入账额度（replayed 时为 0）。 */
-    private fun claimOne(jt: String, mode: String, uid: String, campaignId: String): Pair<Boolean, Long> {
-        val umid = if (mode == MODE_GLOBAL) umidFor(uid) else null
+    private fun claimOne(jt: String, mode: String, campaignId: String): Pair<Boolean, Long> {
         val url = openApiBase(mode) + EP_CAMPAIGNS + "/" + campaignId + "/claim"
-        val text = postBearer(url, jt, JSONObject(), umid)
+        val text = postBearer(url, jt, JSONObject(), null)
         return parseClaim(JSONObject(text))
     }
 
@@ -300,9 +302,12 @@ object QoderAuthApi {
 
     /** claim 响应：返回 (是否真的新领到, 本次入账额度)。replayed=true 表示今天已领过，不算新领。 */
     internal fun parseClaim(root: JSONObject): Pair<Boolean, Long> {
-        val status = root.optString("status", "")
-        val replayed = root.optBoolean("replayed", false)
-        val amount = root.optJSONObject("benefit")?.optLong("amount", 0L) ?: 0L
+        // 有的返回把结果裹在 data 下。
+        val o = if (root.optString("status", "").isBlank() && root.has("data"))
+            (root.optJSONObject("data") ?: root) else root
+        val status = o.optString("status", "")
+        val replayed = o.optBoolean("replayed", false)
+        val amount = o.optJSONObject("benefit")?.optLong("amount", 0L) ?: 0L
         val claimed = status.equals("CLAIMED", true)
         return (claimed && !replayed) to if (claimed && !replayed) amount else 0L
     }
@@ -316,27 +321,27 @@ object QoderAuthApi {
 
     /** 领取编排：取有效 jt → 列活动 → 领 CLAIMABLE 的 → 汇总。失败不抛（一人失败不拖垮整批）。 */
     private fun claimDailyForCred(context: Context, cred: QoderAuthStore.QCred): QClaimResult {
+        // 国际版每日领取由服务端按「原生设备标识」下发（Cosy-MachineToken/MachineType），只有 Qoder
+        // 桌面/CLI 能产出，Android 端无法伪造 → 缺它时服务端返回 200 但隐藏该活动。故直接给准确说明。
+        if (cred.mode == MODE_GLOBAL)
+            return QClaimResult("unsupported", 0,
+                "国际版「每天领 Credits」需 Qoder 桌面端的原生设备标识，本 App 无法提供。请在 Qoder 桌面端「用量面板→礼物图标」领取，或改用「国内版」账号在本 App 内领取。")
         val jt = validJobTokenFor(context, cred, skewMillis = 60_000L)
         if (jt.isNullOrBlank()) return QClaimResult("fail", 0, "没有有效 token，请重新粘贴 PAT 登录")
         val campaigns = try {
-            fetchCampaigns(jt, cred.mode, cred.uid)
-        } catch (e: java.io.IOException) {
-            // 国际版列表若缺 umid 会 4xx；区分区域给出人话
-            return if (cred.mode == MODE_GLOBAL)
-                QClaimResult("unsupported", 0, "国际版活动接口未返回（可能需要真实设备标识）：${e.message}")
-            else QClaimResult("fail", 0, "拉取活动失败：${e.message ?: e.javaClass.simpleName}")
+            fetchCampaigns(jt, cred.mode)
         } catch (e: Exception) {
-            return QClaimResult("fail", 0, "拉取活动失败：${e.javaClass.simpleName}")
+            return QClaimResult("fail", 0, "拉取活动失败：${e.message ?: e.javaClass.simpleName}")
         }
         val claimable = campaigns.filter { it.claimable }
         if (claimable.isEmpty())
-            return QClaimResult("already", 0, "今日无可领活动（可能已领或未到活动时段）")
+            return QClaimResult("already", 0, "今日无可领活动（可能已领或未到 10:00 领取窗口）")
         var total = 0L
         var fresh = 0
         var lastErr: String? = null
         for (c in claimable) {
             try {
-                val (newly, amt) = claimOne(jt, cred.mode, cred.uid, c.id)
+                val (newly, amt) = claimOne(jt, cred.mode, c.id)
                 if (newly) { total += amt; fresh++ }
             } catch (e: Exception) {
                 lastErr = e.message ?: e.javaClass.simpleName
