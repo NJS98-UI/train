@@ -8,6 +8,55 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.4.14] - 2026-10-17
+
+### Added
+- `AccountCredits.kt`（新）：**按账号**积分快照，Trae / Qoder 各一份。
+  - `refreshAll(ctx, force, onDone)` 遍历**全部**账号逐个查（不是只查当前号），
+    `AtomicBoolean` 防连点重复打上游；单账号失败只影响它自己。
+  - 结果内存 + prefs 双缓存（`traework2api_credits`）：进账号页先显示上次的数（带时间戳），
+    后台刷新再原地更新，观感是"一直有数"。
+  - `Snapshot.sum(platform)`：平台合计**只累加查询成功的账号**，一个都没查到返回 `null` 而不是 `0`
+    （0 会被误读成"真的没额度了"）；`totalLabel` 在不完整时输出 `1234（2/3 个账号）` 暴露下界。
+  - `selfCheck()` 钉住：null≠0、合计只加查到的、失败要标 `—（原因）`、有旧值失败要保留旧值。
+- `QoderModelCatalog`：模型带 **`priceFactor`**（官方倍率），`free` / `priceLabel` 派生。
+  - 新增**动态目录**：`setDynamic/merge/current/hasDynamic/load/save/clear`。
+    上游目录按 key 合并进内置清单（内置顺序不变、同 key 覆盖、新 key 追加末尾），
+    落 prefs 重启不丢；解析失败**退回内置清单，绝不清空**（空目录会让聊天全废）。
+  - `parseCatalogJson`：容错解析三种形状（CLI 的 `{chat:[...],byok_*:[...]}` 分组 /
+    扁平数组 / 任意嵌套包装），字段对齐 CLI 的 `catalogEntry`
+    （`key??model_key`、`display_name??name`、`price_factor`、`context_config.token_count`、
+    `enable` 为 false 或 0 才排除）。
+- `QoderAuthApi.fetchModelCatalog(jt, mode)`：从 `{openapi}/api/v1/models`（GET→POST，
+  再退 `/api/v1/model/list`）拉官方目录。成功判据是"能解析出至少一个模型"而不是 HTTP 200
+  —— 官方可能回 200 但内容是 `{code,message}` 壳。失败摘要存 `lastCatalogError` 供 UI 显示。
+- 账号页顶部**「积分总览」**：Trae 合计 / Qoder 合计两个大数字 + 更新时间 + 「刷新积分」。
+- 每个账号卡内联显示自己的积分（Trae 当前号/其它号、Qoder 其它号），**不需要切换账号**。
+- 模型卡显示**官方倍率**：`免费` 绿标 / `×2.5` 灰标，caption 里再写一遍
+  （`context 1000000 · 倍率 ×2.5 · qoder`）。缺 `price_factor` 时显示「倍率未知」而不是编一个 ×1。
+- 模型页（Qoder 后端）首次进入自动同步一次官方目录（每进程一次），
+  「刷新模型」也改成拉官方目录；计数显示 `官方目录/内置清单 + 免费数`。
+
+### Changed
+- `Gateway.kt`：修 **Qoder 续期阈值单位错**。`validJobTokenFor(..., skewMillis)` 要毫秒，
+  原来传的是 `SIXTY_MINUTES_SEC = 3600L`（= 3.6 秒），等于"永远拿旧 token 去撞 401"，
+  续期形同虚设。新增 `SIXTY_MINUTES_MS` 并改用它（两处：转发 + 失败切换）。
+- `QoderUpstream.modelConfigJson`：`price_factor` 改用模型自带值，不再写死 `1.0`
+  （写死会让免费模型看起来像收费，也让上游按错误倍率计费）。
+- `MainActivity.qoderRemainingLabel()`：取数优先级改成 按账号快照 → 监测器快照 → `—`。
+- `MainActivity.onCreate`：新增 `AccountCredits.selfCheck()` + `loadCache()`；
+  `QoderModelCatalog.load(this)` 必须在任何 `/v1/models` 请求之前（否则客户端先拿到内置 16 个、倍率也不对）。
+
+### Notes
+- **为什么 0 倍率模型之前"加载不出来"**：内置的 16 条是参考实现抄下来的旧快照，
+  官方新增的免费模型根本不在里面。倍率更是全写死 1.0。现在以官方目录为准、内置清单兜底。
+- 官方目录端点是用**未鉴权探测**确认的：`/api/v1/models` 与 `/api/v1/model/list`
+  在所有 openapi 主机上都返回 **401**（=路由存在），而 `/api/v2/models`、
+  `/algo/api/v1/model/list` 之类一律 404。响应体形状未实测，故解析器写成容错扫描。
+- 积分查询**不再靠切号**：Qoder 走 `validJobTokenFor(cred)` 直接作用于指定账号，
+  不会因为"看一眼别人的积分"就把当前号偷偷换掉。
+- Trae 国际服积分协议未实测，明确标注「该区域积分暂不支持查询」而不是显示 0。
+
 ## [0.4.13] - 2026-10-16
 
 **Qoder 账号可作本地聊天转发后端（COSY `/algo/` 签名链路）。**

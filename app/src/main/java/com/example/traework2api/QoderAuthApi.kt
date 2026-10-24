@@ -38,6 +38,20 @@ object QoderAuthApi {
     // 列表 GET /sash/api/v1/me/campaigns?forceRefresh=true；领取 POST .../campaigns/{id}/claim（body {}，幂等）。
     private const val EP_CAMPAIGNS = "/sash/api/v1/me/campaigns"
 
+    // 官方模型目录（带真实 price_factor）。实测：这两个路径在所有 openapi 主机上
+    // 未鉴权时都返回 **401**（=路由存在，只是缺 token），而 /api/v2/models、
+    // /algo/api/v1/model/list 之类一律 404。两个都试，谁先回出可解析的目录用谁。
+    private const val EP_MODELS = "/api/v1/models"
+    private const val EP_MODEL_LIST = "/api/v1/model/list"
+
+    /**
+     * 最近一次模型目录拉取的失败摘要（给 UI 显示，便于排查"为什么同步不了"）。
+     * 形如 `GET /api/v1/models → HTTP 401`。成功时清空。
+     */
+    @Volatile
+    var lastCatalogError: String? = null
+        private set
+
     private const val JSON = "application/json"
 
     private val client = OkHttpClient.Builder()
@@ -85,6 +99,69 @@ object QoderAuthApi {
         client.newCall(req).execute().use { r ->
             val text = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw java.io.IOException("Qoder ${r.code}: ${text.take(200)}")
+            return text
+        }
+    }
+
+    /**
+     * 拉**官方模型目录**（含真实 `price_factor`）。拿不到返回 null，调用方保留原清单。
+     *
+     * 为什么用"能解析出模型"当成功判据而不是 HTTP 200：官方可能回 200 但内容是
+     * `{"code":..,"message":..}` 这种壳；那种东西交给 [QoderModelCatalog.parseCatalogJson]
+     * 会解析出 0 条，正好用来判定"这次不算成功"，继续试下一个候选。
+     *
+     * 候选顺序：`/api/v1/models`（GET → POST）→ `/api/v1/model/list`（GET → POST）。
+     */
+    fun fetchModelCatalog(jt: String, mode: String): String? {
+        if (jt.isBlank()) {
+            lastCatalogError = "没有可用的 jobToken"
+            return null
+        }
+        lastCatalogError = null
+        val base = openApiBase(mode)
+        val fails = ArrayList<String>()
+        for (path in listOf(EP_MODELS, EP_MODEL_LIST)) {
+            for (method in listOf("GET", "POST")) {
+                val text = try {
+                    rawRequest(base + path, jt, method, fails)
+                } catch (e: Exception) {
+                    fails.add("$method $path → ${e.javaClass.simpleName}")
+                    Log.w(TAG, "模型目录 $method $path 异常: ${e.javaClass.simpleName}")
+                    null
+                } ?: continue
+                if (QoderModelCatalog.parseCatalogJson(text).isNotEmpty()) {
+                    Log.i(TAG, "模型目录已拉取（$method $path，${text.length} 字节）")
+                    return text
+                }
+                fails.add("$method $path → 内容不像目录")
+                Log.i(TAG, "模型目录 $method $path 内容不像目录，继续试下一个候选")
+            }
+        }
+        lastCatalogError = fails.joinToString("；").ifBlank { "全部候选都失败" }
+        return null
+    }
+
+    /** 返回 2xx 的响应体；非 2xx 返回 null（**不抛**，让调用方继续试下一个候选）。 */
+    private fun rawRequest(url: String, bearer: String, method: String, fails: MutableList<String>): String? {
+        val builder = Request.Builder().url(url)
+            .header("Authorization", "Bearer $bearer")
+            .header("Accept", JSON)
+            .header("User-Agent", "traework2api")
+            .header("Cosy-Version", "1.0.1")
+            .header("Cosy-ClientType", "5")
+        if (method == "POST") {
+            builder.post("{}".toRequestBody(JSON.toMediaType()))
+        } else {
+            builder.get()
+        }
+        client.newCall(builder.build()).execute().use { r ->
+            val text = r.body?.string().orEmpty()
+            if (!r.isSuccessful) {
+                val short = url.substringAfter("//")
+                Log.i(TAG, "模型目录 $method $short → HTTP ${r.code}")
+                fails.add("$method /${url.substringAfterLast("/api/")} → HTTP ${r.code}")
+                return null
+            }
             return text
         }
     }
@@ -441,6 +518,10 @@ object QoderAuthApi {
         check(QCredits(50.0, false).hasCredit) { "自检失败：有剩余额度应判 hasCredit" }
         check(!QCredits(0.0, false).hasCredit) { "自检失败：零额度不应 hasCredit" }
         check(!QCredits(50.0, true).hasCredit) { "自检失败：isQuotaExceeded 应判无额度" }
+
+        // 模型目录：无 token 必须直接返回 null（不许为了一次刷新去打上游）
+        check(fetchModelCatalog("", MODE_CN) == null) { "自检失败：无 jobToken 不该发起模型目录请求" }
+        check(fetchModelCatalog("   ", MODE_GLOBAL) == null) { "自检失败：空白 jobToken 不该发起模型目录请求" }
 
         // campaigns host 必须带 /sash 前缀（与 usage 的 /api/v2 不同链路）。
         check((openApiBase(MODE_CN) + EP_CAMPAIGNS).contains("/sash/api/v1/me/campaigns")) {

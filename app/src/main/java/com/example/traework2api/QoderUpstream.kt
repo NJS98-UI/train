@@ -143,7 +143,9 @@ object QoderUpstream {
         .put("display_name", m.name)
         .put("is_vl", true)
         .put("is_reasoning", m.reasoning)
-        .put("price_factor", 1.0)
+        // 用**官方标注的真实倍率**（来自上游目录），不要写死 1.0：
+        // 写死会让上游按错误倍率计费/路由，也让免费模型看起来像收费。
+        .put("price_factor", m.priceFactor)
 
     /** 采样参数。缺省 max_tokens 用 32000（与参考实现一致，不是无限）。 */
     private fun parameters(src: JSONObject): JSONObject {

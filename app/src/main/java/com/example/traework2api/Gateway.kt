@@ -14,6 +14,12 @@ import java.util.UUID
  */
 object Gateway {
     private const val SIXTY_MINUTES_SEC = 3600L
+    /**
+     * ⚠️ Qoder 的续期阈值单位是**毫秒**（`validJobTokenFor(..., skewMillis)`），
+     * 和 Trae 的 `skewSec` 不是一个单位。早前这里错用了 [SIXTY_MINUTES_SEC]，
+     * 实际只等于 3.6 秒 —— 等于"永远拿旧 token 去撞 401"，续期形同虚设。
+     */
+    private const val SIXTY_MINUTES_MS = 60L * 60L * 1000L
     private const val TAG = "Gateway"
 
     /**
@@ -94,7 +100,7 @@ object Gateway {
             locked<QoderAuthStore.QCred?> {
                 val cred = QoderAuthStore.load(app) ?: return@locked null
                 // 转发前续期：jobToken 是短时的，服务长驻不能只靠登录时那一个。
-                val jt = QoderAuthApi.validJobTokenFor(app, cred, SIXTY_MINUTES_SEC) ?: cred.jobToken
+                val jt = QoderAuthApi.validJobTokenFor(app, cred, SIXTY_MINUTES_MS) ?: cred.jobToken
                 if (jt.isBlank()) null else cred.copy(jobToken = jt)
             }
         }
@@ -105,7 +111,7 @@ object Gateway {
             locked<QoderAuthStore.QCred?> {
                 QoderAuthStore.setActive(app, next.uid)
                 val c = QoderAuthStore.load(app) ?: return@locked null
-                val jt = QoderAuthApi.validJobTokenFor(app, c, SIXTY_MINUTES_SEC) ?: c.jobToken
+                val jt = QoderAuthApi.validJobTokenFor(app, c, SIXTY_MINUTES_MS) ?: c.jobToken
                 if (jt.isBlank()) null else c.copy(jobToken = jt)
             }
         }

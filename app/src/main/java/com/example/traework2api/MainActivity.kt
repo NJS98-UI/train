@@ -162,6 +162,13 @@ class MainActivity : Activity() {
     private var qoderCatchUpTried = false
     /** 「积分与用量」/「Qoder 账号」卡里会被监测器原地刷新的控件。 */
     private var monitorApply: (() -> Unit)? = null
+
+    // ---- 账号页「按账号积分」（AccountCredits）----
+    /** 每个账号卡里的"积分"文字 + 它的取值函数；重建页面时清空。 */
+    private val creditViews = ArrayList<Pair<TextView, () -> String>>()
+    private var creditTotalTrae: TextView? = null
+    private var creditTotalQoder: TextView? = null
+    private var creditUpdated: TextView? = null
     /**
      * 「积分与用量」卡里那几个会被刷新改掉的控件 —— 刷新时**原地改文字**，不重建页面。
      *
@@ -178,6 +185,8 @@ class MainActivity : Activity() {
      * 每次 [modelsPage] 构建时重新登记，离开本页后作废。
      */
     private var modelsRefreshApply: (() -> Unit)? = null
+    /** 本次进程是否已自动同步过 Qoder 官方模型目录（避免每次进模型页都打上游）。 */
+    private var qoderCatalogAutoTried = false
 
     /** 模型表刷新进行中：按钮置灰 + 文案变「刷新中…」，否则用户点了没反馈会连点。 */
     private var modelsLoading = false
@@ -240,6 +249,9 @@ class MainActivity : Activity() {
         // 装入磁盘模型缓存（必须在 selfCheck 之后、任何 /v1/models 请求之前）：
         // 客户端在 App 刚重启、还没手动刷模型时也能拉到上次刷到的清单。
         ModelsRepo.init(this)
+        // 装入上次同步到的 Qoder 官方模型目录（含真实倍率）。
+        // 必须在任何 /v1/models 请求之前：否则客户端会先拿到内置 16 个，倍率也不对。
+        QoderModelCatalog.load(this)
         // 恢复上次选择的区域：不恢复的话重启后会回落 CN，
         // 国际服 token 就会被发到国内服 host（实测 401/1001 或 4001）。
         TraeRegion.load(this)
@@ -251,6 +263,10 @@ class MainActivity : Activity() {
         // 后端选择自检：auto 在"只登 Qoder"时必须解析成 Qoder，否则聊天会拿空 Trae 凭证。
         // 必须放在区域恢复之后：TraeAuthStore.load 的结果参与 auto 判定。
         GatewayBackend.selfCheck(this)
+        // 按账号积分的展示规则自检（合计只加查到的、失败要暴露成下界、null ≠ 0）。
+        AccountCredits.selfCheck()
+        // 装入按账号积分缓存：进账号页立刻有数，后台刷新再原地更新。
+        AccountCredits.loadCache(this)
         // 保活页的 ROM 识别自检：SystemProperties 是隐藏 API（靠反射），读不到也不能崩。
         KeepAlive.selfCheck()
 
@@ -558,6 +574,31 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------
 
     private fun accountPage(): View = scroll {
+        // 本页会重建，旧的积分控件句柄必须清掉，否则刷新回来会写进已分离的 View
+        creditViews.clear()
+
+        // ---- 积分总览：两个平台各一个合计 ----
+        // 放在最上面：用户进账号页的第一诉求是"我还有多少"，账号细节是第二层。
+        addView(card {
+            addView(row {
+                addView(text("积分总览", FS_CARD_TITLE, true), weighted())
+                addView(linkAction("刷新积分") {
+                    toast("正在查询全部账号积分…")
+                    AccountCredits.refreshAll(this@MainActivity, force = true) { refreshCreditViews() }
+                })
+            })
+            creditTotalTrae = text("—", FS_METRIC, true, "primary")
+            creditTotalQoder = text("—", FS_METRIC, true, "primary")
+            addView(row(12) {
+                addView(creditBlock("Trae 合计", creditTotalTrae!!), weighted())
+                addView(creditBlock("Qoder 合计", creditTotalQoder!!), weighted(start = 12))
+            })
+            creditUpdated = caption("")
+            addView(creditUpdated!!, top(10))
+            addView(caption("每个账号的余量直接标在它自己的卡上，**不需要切换账号**。" +
+                "合计只累加查询成功的账号，括号里的 n/m 表示有几个账号没查到（此时合计是下界）。"), top(6))
+        })
+
         addView(section("Trae 账号"))
         val metas = TraeAuthStore.list(this@MainActivity)
         val activeUid = TraeAuthStore.activeUid(this@MainActivity)
@@ -582,6 +623,7 @@ class MainActivity : Activity() {
                     addView(labelValue("Access Token", "已持久化（加密存储）"), top(4))
                     addView(labelValue("Token 状态", tokenRenewLabel(cred.expiresAt)), top(4))
                     if (cred.expiresAt > 0L) addView(labelValue("到期时间", formatExp(cred.expiresAt)), top(4))
+                    addView(creditLabel(AccountCredits.TRAE, cred.uid), top(4))
                 }
             })
             // 其它账号：点击切换，长按/按钮删除
@@ -599,6 +641,7 @@ class MainActivity : Activity() {
                             }
                         })
                         addView(caption("UID: ${m.uid} · Token: ${tokenRenewLabel(m.expiresAt)}"), top(6))
+                        addView(creditLabel(AccountCredits.TRAE, m.uid), top(2))
                         addView(row(8) {
                             addView(action("切换到此账号", outlined = true) { switchAccount(m.uid) }, weighted())
                             addView(action("删除", outlined = true) { confirmRemoveAccount(m) }, weighted(start = 8))
@@ -723,7 +766,9 @@ class MainActivity : Activity() {
                 })
                 addView(caption(
                     if (isQ) "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Qoder**（COSY 签名链路），" +
-                        "模型表用内置的 ${QoderModelCatalog.ALL.size} 个；不需要 Trae 登录。"
+                        "模型表 ${QoderModelCatalog.current().size} 个（" +
+                        (if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单") +
+                        "，${QoderModelCatalog.freeCount()} 个免费）；不需要 Trae 登录。"
                     else "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Trae**（solo_work_remote），" +
                         "模型表来自「模型」页刷新；Qoder 账号此刻不参与转发（要转发点下面的按钮切后端）。"
                 ), top(6))
@@ -782,6 +827,7 @@ class MainActivity : Activity() {
                             addView(chipInfo(if (m.mode == QoderAuthApi.MODE_GLOBAL) "国际" else "国内"))
                         })
                         addView(caption("UID: ${m.uid}"), top(6))
+                        addView(creditLabel(AccountCredits.QODER, m.uid), top(2))
                         addView(row(8) {
                             addView(action("切换到此账号", outlined = true) { switchQoderAccount(m.uid) }, weighted())
                             addView(action("删除", outlined = true) { confirmRemoveQoder(m) }, weighted(start = 8))
@@ -827,6 +873,10 @@ class MainActivity : Activity() {
             addView(action("粘贴 PAT 添加 Qoder 账号", outlined = true, full = true) { promptQoderPat() }, top(8))
         }
 
+        // 先用缓存把数字画上（进页面立刻有数），再后台刷新全部账号
+        refreshCreditViews()
+        AccountCredits.refreshAll(this@MainActivity) { refreshCreditViews() }
+
         // 登记"监测器要把哪些控件原地刷新"（Qoder 余量 + 自动换号/阈值状态）
         monitorApply = {
             qoderCreditView?.text = qoderRemainingLabel()
@@ -835,9 +885,106 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Qoder 积分余量数值位：没拉到/无账号显示「—」。 */
-    private fun qoderRemainingLabel(): String =
-        qoderRemaining?.let { "%.1f".format(it) } ?: "—"
+    // ------------------------------------------------------------------
+    // 按账号积分（AccountCredits）的界面胶水
+    // ------------------------------------------------------------------
+
+    /** 倍率文本：`0` / `1` / `2.5`（去掉无意义的小数尾巴）。 */
+    private fun priceText(v: Double): String =
+        if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
+
+    /** 一个可原地刷新的"积分"文字（登记到 [creditViews]，刷新回来只改 text，不重建页面）。 */
+    private fun creditLabel(platform: String, uid: String): TextView {
+        val tv = text("", FS_CAPTION, false, "on_surface_variant")
+        val value: () -> String = {
+            val snap = AccountCredits.current()
+            val item = if (platform == AccountCredits.TRAE) snap.trae(uid) else snap.qoder(uid)
+            "积分：${AccountCredits.label(item)}"
+        }
+        creditViews.add(tv to value)
+        tv.text = value()
+        return tv
+    }
+
+    /** 总览里的一个竖排小块（标题 + 大数字）。 */
+    private fun creditBlock(title: String, value: TextView): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(caption(title))
+        addView(value, top(2))
+    }
+
+    /** 把 [creditViews] 与两个合计、更新时间**原地**重画（不 render，滚动位置不丢）。 */
+    private fun refreshCreditViews() {
+        for ((tv, value) in creditViews) tv.text = value()
+        val snap = AccountCredits.current()
+        creditTotalTrae?.text = AccountCredits.totalLabel(snap, AccountCredits.TRAE)
+        creditTotalQoder?.text = AccountCredits.totalLabel(snap, AccountCredits.QODER)
+        creditUpdated?.text = when {
+            snap.loading -> "正在查询全部账号…"
+            snap.at <= 0L -> "尚未查询（点右上「刷新积分」）"
+            else -> "更新于 ${clockText(snap.at)}"
+        }
+    }
+
+    /** `HH:mm:ss`。 */
+    private fun clockText(ms: Long): String =
+        java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(ms))
+
+    /**
+     * 从 Qoder 官方拉模型目录（含真实倍率、以及内置清单里没有的免费模型）。
+     *
+     * 失败**不清空**现有清单（内置清单永远兜底）：模型列表空了聊天直接废。
+     * 成功后按 key 合并进内置清单并落盘，重启不丢。
+     */
+    private fun syncQoderCatalog(quiet: Boolean = false) {
+        val cred = QoderAuthStore.load(this)
+        if (cred == null) {
+            if (!quiet) toast("先添加一个 Qoder 账号，才能拉官方模型目录")
+            modelsRefreshApply?.invoke()
+            return
+        }
+        if (!quiet) toast("正在拉取 Qoder 官方模型目录…")
+        thread(name = "qoder-catalog-sync") {
+            val jt = QoderAuthApi.validJobTokenFor(this, cred, 60L * 60L * 1000L)
+                ?: cred.jobToken.takeIf { it.isNotBlank() }
+            val raw = if (jt.isNullOrBlank()) null else QoderAuthApi.fetchModelCatalog(jt, cred.mode)
+            val parsed = if (raw == null) emptyList() else QoderModelCatalog.parseCatalogJson(raw)
+            if (raw != null && parsed.isNotEmpty()) {
+                QoderModelCatalog.setDynamic(parsed)
+                QoderModelCatalog.save(this, raw)
+            }
+            val total = QoderModelCatalog.current().size
+            val free = QoderModelCatalog.freeCount()
+            val dynamic = QoderModelCatalog.hasDynamic()
+            runOnUiThread {
+                modelsRefreshApply?.invoke()
+                if (!quiet) {
+                    if (dynamic) {
+                        toast("官方目录已同步：$total 个模型（$free 个免费）")
+                    } else {
+                        val why = QoderAuthApi.lastCatalogError?.take(120)
+                        toast("拉取失败，继续用内置 $total 个模型" + (if (why != null) "\n$why" else ""))
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Qoder 积分余量数值位：没拉到/无账号显示「—」。
+     *
+     * 取数优先级：**按账号快照**（[AccountCredits]，覆盖全部账号、带时间戳）
+     * → 监测器快照（[CreditMonitor]，只盯当前账号、2 秒一次）。
+     * 前者更新更全，后者更实时，都拿不到才显示「—」。
+     */
+    private fun qoderRemainingLabel(): String {
+        val uid = QoderAuthStore.activeUid(this)
+        if (uid != null) {
+            val v = AccountCredits.current().qoder(uid)?.remaining
+            if (v != null) return AccountCredits.format(v)
+        }
+        return qoderRemaining?.let { "%.1f".format(it) } ?: "—"
+    }
 
     // ------------------------------------------------------------------
     // Qoder：粘贴 PAT 登录 / 切号 / 删除
@@ -1204,7 +1351,14 @@ class MainActivity : Activity() {
         // 刷新按钮 + 计数。计数是"刷新真的起作用了"的证据 —— 否则点了没新增时用户会以为没生效。
         val countView = caption("")
         fun refreshCountLabel() {
-            countView.text = "已加载 · ${GatewayBackend.modelsFor(this@MainActivity).length()} 个模型"
+            val n = GatewayBackend.modelsFor(this@MainActivity).length()
+            countView.text = if (GatewayBackend.isQoder(this@MainActivity)) {
+                val free = QoderModelCatalog.freeCount()
+                val src = if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单"
+                "已加载 · $n 个模型（$src · $free 个免费）"
+            } else {
+                "已加载 · $n 个模型"
+            }
         }
         val refreshBtn = action(REFRESH_MODELS_LABEL) { refreshModels() }
         // 刷新中：按钮置灰 + 文案变「刷新中…」（照抄记录页/积分刷新那套，别新造轮子）
@@ -1223,7 +1377,15 @@ class MainActivity : Activity() {
         // 未加载：整页只有一张说明卡 + 刷新按钮（用户要的"空状态"，见 CHANGELOG 0.4.3）
         val notLoaded = card {
             addView(text("模型目录尚未加载", FS_CARD_TITLE, true))
-            addView(caption("连接账号后点击「$REFRESH_MODELS_LABEL」，将从上游加载真实可用模型。"), top(8))
+            addView(caption(
+                if (GatewayBackend.isQoder(this@MainActivity)) {
+                    "点「$REFRESH_MODELS_LABEL」从 Qoder 官方拉目录（含每个模型的倍率，" +
+                        "以及内置清单里没有的免费模型）。拉不到会继续用内置 " +
+                        "${QoderModelCatalog.BUILTIN.size} 个。"
+                } else {
+                    "连接账号后点击「$REFRESH_MODELS_LABEL」，将从上游加载真实可用模型。"
+                }
+            ), top(8))
             addView(action(REFRESH_MODELS_LABEL, full = true) { refreshModels() }, top(12))
         }
         addView(notLoaded)
@@ -1237,6 +1399,13 @@ class MainActivity : Activity() {
         // 卡片容器：刷新时**只清空并重塞它的子项**，不动搜索框/按钮/空态（原地更新，滚动位置不丢）
         val cardHost = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
         addView(cardHost)
+
+        // Qoder 后端首次进本页：自动拉一次官方目录（含倍率 + 内置清单没有的免费模型）。
+        // 每进程只试一次：拉不到就安静地用内置清单，不要每次切页都打上游。
+        if (GatewayBackend.isQoder(this@MainActivity) && !qoderCatalogAutoTried) {
+            qoderCatalogAutoTried = true
+            syncQoderCatalog(quiet = true)
+        }
 
         // 过滤逻辑收成一个函数：刷新重塞后也要重跑一次，否则过滤会作用在已失效的旧 View 上
         var cards = HashMap<String, View>()
@@ -1297,7 +1466,16 @@ class MainActivity : Activity() {
     private fun modelCard(m: org.json.JSONObject): View = card {
         val id = m.optString("id", "").ifBlank { m.optString("config_name", "") }
         val name = m.optString("name", "").ifBlank { id }
-        addView(text(name, FS_CARD_TITLE, true))
+        // 官方标注的倍率：0 = 免费（Qoder 目录里确实有这种）。
+        // 缺字段时**不显示**而不是显示 ×1 —— 显示错误的倍率比不显示更误导。
+        val pf = if (m.has("price_factor")) m.optDouble("price_factor", 1.0) else null
+        addView(row {
+            addView(text(name, FS_CARD_TITLE, true), weighted())
+            if (pf != null) {
+                if (pf <= 0.0) addView(chipOk("免费"))
+                else addView(chipInfo("×" + priceText(pf)))
+            }
+        })
         addView(row(4) {
             addView(mono(id, FS_CHIP, colorName = "on_surface_variant").apply {
                 maxLines = 1
@@ -1308,7 +1486,8 @@ class MainActivity : Activity() {
         // ⚠️ 必须显式 this@MainActivity：这里是 card { } 的 LinearLayout 接收者作用域，
         //    裸 this 是容器不是 Context，编译期直接报 argument type mismatch。
         val backendTag = if (GatewayBackend.isQoder(this@MainActivity)) "qoder" else "trae-solo"
-        addView(caption("context ${m.optInt("context_length", 0)} · $backendTag"), top(4))
+        val pfText = if (pf == null) "倍率未知" else if (pf <= 0.0) "免费（0 倍率）" else "倍率 ×${priceText(pf)}"
+        addView(caption("context ${m.optInt("context_length", 0)} · $pfText · $backendTag"), top(4))
     }
 
     private fun copyModelId(id: String) = copyToClipboard("modelId", id, "已复制模型 ID: $id")
@@ -1985,11 +2164,10 @@ class MainActivity : Activity() {
      * 客户端拿到的仍是上次刷到的清单，所以只打日志，绝不能打扰用户。
      */
     private fun refreshModels(quiet: Boolean = false) {
-        // Qoder 后端的模型目录是**内置**的（协议要求，见 QoderModelCatalog），
-        // 没有"从上游拉表"这回事：点刷新只需重画，别拿 Trae 的 token 去打 Trae 的接口。
+        // Qoder 后端：拉**官方目录**（含真实倍率与内置清单里没有的免费模型）。
+        // 拉不到就继续用内置清单 —— 绝不因为一次网络失败把模型列表清空。
         if (GatewayBackend.isQoder(this)) {
-            modelsRefreshApply?.invoke()
-            if (!quiet) toast("Qoder 模型目录为内置清单（${QoderModelCatalog.ALL.size} 个），无需刷新")
+            syncQoderCatalog(quiet)
             return
         }
         val cred = TraeAuthStore.load(this)
