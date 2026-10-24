@@ -713,6 +713,7 @@ class MainActivity : Activity() {
             // 一个按钮覆盖两个平台的**全部账号**：文案固定，不随单平台登录态变（否则
             // "未登录" 会把"Qoder 还能签"这件事说没了）
             addView(action("一键签到全部账号", full = true) { claimAllCheckin() })
+            addView(linkAction("诊断领取链路") { runQoderDiagnose() }, top(8))
             addView(statusView, top(10))
 
             addView(divider(), top(14))
@@ -1312,6 +1313,41 @@ class MainActivity : Activity() {
                 qoderRemaining = null
                 CreditMonitor.stale = true
                 render(currentPage)
+            }
+        }
+    }
+
+    /** 诊断：跑一遍领取链路并把原文摊在弹窗里，可一键复制。 */
+    private fun runQoderDiagnose() {
+        if (QoderAuthStore.list(this).isEmpty()) { toast("没有 Qoder 账号"); return }
+        toast("诊断中…")
+        thread(name = "qoder-diagnose") {
+            val text = runCatching { QoderAuthApi.diagnose(this) }
+                .getOrElse { "诊断异常：${it.javaClass.simpleName}: ${it.message}" }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val box = android.widget.TextView(this).apply {
+                    text = text
+                    typeface = android.graphics.Typeface.MONOSPACE
+                    textSize = 10f
+                    setTextIsSelectable(true)
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                }
+                val scroll = android.widget.ScrollView(this).apply { addView(box) }
+                val dlg = android.app.AlertDialog.Builder(this)
+                    .setTitle("领取链路诊断")
+                    .setView(scroll)
+                    .setPositiveButton("复制", null)
+                    .setNegativeButton("关闭", null)
+                    .create()
+                dlg.setOnShowListener {
+                    dlg.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("diagnose", text))
+                        toast("已复制")
+                    }
+                }
+                dlg.show()
             }
         }
     }

@@ -8,6 +8,14 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.6] - 2026-10-17
+
+### Added
+- 账号页「一键签到」卡下新增**诊断领取链路**：把每个 Qoder 账号的
+  jobToken 状态、campaigns 原文、每条活动的 `actionType/claimStatus/benefit`、
+  以及 claim 的实际结果摊在弹窗里，可一键复制。
+  手机端拿不到 logcat（ADB 未授权），这是唯一能把"领不到"落到证据上的办法。
+
 ## [0.7.5] - 2026-10-17
 
 ### Fixed

@@ -480,6 +480,56 @@ object QoderAuthApi {
         return parseCampaigns(JSONObject(text))
     }
 
+    /**
+     * 诊断：把领取链路**每一步的原始结果**拼成可复制的文本。
+     *
+     * 为什么要有：手机端拿不到 logcat（ADB 未授权），用户说"领不到"时
+     * 只有"账号页显示什么"这一条线索，双方都在猜。这个把 HTTP 原文摊开，
+     * 一次就能定位是 token、是活动列表、还是 claim 被拒。
+     */
+    fun diagnose(ctx: Context): String {
+        val sb = StringBuilder()
+        val list = QoderAuthStore.list(ctx)
+        sb.append("账号数：").append(list.size).append('\n')
+        if (list.isEmpty()) return sb.append("没有 Qoder 账号\n").toString()
+        for (m in list) {
+            sb.append("\n== ").append(m.name.ifBlank { m.uid }).append(" · ").append(m.uid.take(8))
+                .append(" · ").append(m.mode).append(" ==\n")
+            val cred = QoderAuthStore.loadByUid(ctx, m.uid)
+            if (cred == null) { sb.append("凭据缺失\n"); continue }
+            val jt = runCatching { validJobTokenFor(ctx, cred, 60_000L) }.getOrNull()
+            if (jt.isNullOrBlank()) { sb.append("jobToken 失败（PAT 无效或网络不通）\n"); continue }
+            sb.append("jobToken ok ").append(jt.take(12)).append("…\n")
+            val id = if (cred.mode == MODE_GLOBAL) {
+                runCatching { QoderMachine.identity(ctx, QoderAuthStore.fingerprint(ctx, m.uid)) }.getOrNull()
+            } else null
+            val raw = try {
+                getForCampaigns(openApiBase(cred.mode) + EP_CAMPAIGNS + "?forceRefresh=true", jt, cred.mode, id)
+            } catch (e: Exception) {
+                sb.append("campaigns 请求失败：").append(e.javaClass.simpleName)
+                    .append(": ").append(e.message).append('\n')
+                continue
+            }
+            val camps = runCatching { parseCampaigns(JSONObject(raw)) }.getOrElse { emptyList() }
+            sb.append("解析 ").append(camps.size).append(" 条，可领 ")
+                .append(camps.count { it.claimable }).append(" 条\n")
+            for (c in camps) {
+                sb.append("  · ").append(c.id.take(8)).append(' ').append(c.actionType)
+                    .append(' ').append(c.claimStatus)
+                    .append(" benefit=").append(c.benefitKind).append('/').append(c.benefitAmount)
+                    .append(if (c.claimable) "  ← 可领" else "").append('\n')
+            }
+            for (c in camps.filter { it.claimable }) {
+                val r = runCatching { claimOne(jt, cred.mode, c.id, id) }
+                sb.append("  claim ").append(c.id.take(8)).append(" → ")
+                    .append(r.fold({ "新领=${it.first} 额度=${it.second}" }, { "异常 ${it.javaClass.simpleName}: ${it.message}" }))
+                    .append('\n')
+            }
+            sb.append("campaigns 原文：\n").append(raw.take(1000)).append('\n')
+        }
+        return sb.toString()
+    }
+
     /** 领一条活动。body 固定 {}（幂等）。返回本次入账额度（replayed 时为 0）。 */
     private fun claimOne(jt: String, mode: String, campaignId: String, id: QoderMachine.Identity?): Pair<Boolean, Long> {
         val url = openApiBase(mode) + EP_CAMPAIGNS + "/" + campaignId + "/claim"
