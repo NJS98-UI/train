@@ -1305,7 +1305,9 @@ class MainActivity : Activity() {
             }, weighted())
             addView(linkAction("复制") { copyModelId(id) })
         })
-        val backendTag = if (GatewayBackend.isQoder(this)) "qoder" else "trae-solo"
+        // ⚠️ 必须显式 this@MainActivity：这里是 card { } 的 LinearLayout 接收者作用域，
+        //    裸 this 是容器不是 Context，编译期直接报 argument type mismatch。
+        val backendTag = if (GatewayBackend.isQoder(this@MainActivity)) "qoder" else "trae-solo"
         addView(caption("context ${m.optInt("context_length", 0)} · $backendTag"), top(4))
     }
 
