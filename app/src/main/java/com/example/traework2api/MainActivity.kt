@@ -706,20 +706,13 @@ class MainActivity : Activity() {
 
         // ---- 一键签到（所有账号 / 所有平台）----
         addView(section("一键签到"))
-        val loggedIn = traeActive != null
         addView(card {
-            val checkinAction = TextView(this@MainActivity).apply {
-                gravity = Gravity.CENTER
-                setOnClickListener { claimAllCheckin() }
-            }
-            refreshCheckinButton(checkinAction, loggedIn)
             val statusView = caption("")
-            quotaApply = {
-                refreshCheckinButton(checkinAction, loggedIn)
-                statusView.text = checkinStatusText()
-            }
+            quotaApply = { statusView.text = checkinStatusText() }
             statusView.text = checkinStatusText()
-            addView(checkinAction, lp(-1, -2))
+            // 一个按钮覆盖两个平台的**全部账号**：文案固定，不随单平台登录态变（否则
+            // "未登录" 会把"Qoder 还能签"这件事说没了）
+            addView(action("一键签到全部账号", full = true) { claimAllCheckin() })
             addView(statusView, top(10))
 
             addView(divider(), top(14))

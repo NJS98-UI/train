@@ -69,10 +69,15 @@ object CreditMonitor {
         prefs(ctx).edit().putBoolean(KEY_AUTO, v).apply(); stale = true
     }
 
-    /** 触发换号的余量阈值：当前积分 ≤ 该值即算"用完"。默认 0。 */
-    fun threshold(ctx: Context): Long = prefs(ctx).getLong(KEY_THRESHOLD, 0L).coerceAtLeast(0L)
+    /**
+     * 触发换号的余量阈值：当前积分 ≤ 该值即算"用完"。
+     *
+     * 下限固定 5：界面上只有 5 / 10 / 15 / 20 四档，老版本存的 0 会被抬到 5，
+     * 否则进页面时四档全不亮，看起来像坏了。
+     */
+    fun threshold(ctx: Context): Long = prefs(ctx).getLong(KEY_THRESHOLD, 5L).coerceAtLeast(5L)
     fun setThreshold(ctx: Context, v: Long) {
-        prefs(ctx).edit().putLong(KEY_THRESHOLD, v.coerceAtLeast(0L)).apply(); stale = true
+        prefs(ctx).edit().putLong(KEY_THRESHOLD, v.coerceAtLeast(5L)).apply(); stale = true
     }
 
     /**
