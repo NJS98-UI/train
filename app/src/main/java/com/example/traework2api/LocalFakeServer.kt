@@ -648,13 +648,77 @@ class LocalFakeServer(private val apiKey: String) {
                         android.util.Log.w(TAG, "还原账号失败: ${e.javaClass.simpleName}: ${e.message}")
                     }
                 }
-                // 非流式：到这里所有帧都攒完了，聚合成一个 chat.completion 一次性返回。
-                if (collected != null) writeJson(out, 200, aggregateChunks(collected, model))
+                // 非流式：到这里所有帧都攒完了。
+                // ⚠️ 必须先判错：上游发的是 `event: error` + `data: {"error":…}` 这种帧，
+                // aggregateChunks 只认 choices，会把它聚合成**空回复** ——
+                // 客户端于是看到 200 + 空内容，以为是"模型不说话了"，实际是额度/鉴权问题。
+                if (collected != null) {
+                    val upErr = extractUpstreamError(collected)
+                    if (err != null || upErr != null) {
+                        val msg = upErr ?: humanizeUpstreamError(err!!)
+                        android.util.Log.w(TAG, "非流式上游失败: $msg")
+                        writeJson(out, 502, openAIError("upstream_error", msg, 502))
+                    } else {
+                        writeJson(out, 200, aggregateChunks(collected, model))
+                    }
+                }
                 return
             }
             android.util.Log.i(TAG, "换号后重试（原错误: $err）")
             attempt++
         }
+    }
+
+    /**
+     * 从攒下的 SSE 帧里抠出上游的错误文案。
+     *
+     * 上游两种形状都要认：`data: "Billing daily count exceeded"`（纯字符串）
+     * 和 `data: {"error":{"message":"…"}}`（对象）。抠不到返回 null。
+     */
+    internal fun extractUpstreamError(chunks: List<String>): String? {
+        for (frame in chunks) {
+            for (line in frame.split('\n')) {
+                val t = line.trim()
+                if (!t.startsWith("data:")) continue
+                val payload = t.removePrefix("data:").trim()
+                if (payload.isEmpty() || payload == "[DONE]") continue
+                if (payload.startsWith("\"")) {
+                    // 纯 JSON 字符串字面量
+                    val str = try { org.json.JSONTokener(payload).nextValue() as? String } catch (_: Exception) { null }
+                    if (!str.isNullOrBlank()) return humanizeUpstreamError(str)
+                    continue
+                }
+                val obj = try { JSONObject(payload) } catch (_: Exception) { continue }
+                val e = obj.opt("error") ?: continue
+                val msg = when (e) {
+                    is String -> e
+                    is JSONObject -> e.optString("message", e.optString("type", ""))
+                    else -> e.toString()
+                }
+                if (msg.isNotBlank()) return humanizeUpstreamError(msg)
+            }
+        }
+        return null
+    }
+
+    /**
+     * 把上游错误翻译成用户能照做的中文。**保留原文**，只在其后追加提示 ——
+     * 猜错原因比不猜更糟，用户拿原文去搜/去问都有用。
+     */
+    internal fun humanizeUpstreamError(raw: String): String {
+        val hint = when {
+            raw.contains("Billing daily count exceeded", ignoreCase = true) ->
+                "Qoder 账号今天的计费次数已用完（Billing daily count exceeded）。明天会重置；" +
+                    "急着用就换一个 Qoder 账号，或把后端切到 Trae。"
+            raw.contains("billing", ignoreCase = true) && raw.contains("exceed", ignoreCase = true) ->
+                "账号额度/计费次数已用尽，明天重置或换账号。"
+            raw.contains("quota", ignoreCase = true) || raw.contains("insufficient", ignoreCase = true) ->
+                "账号额度不足，换账号或等重置。"
+            raw.contains("unauthorized", ignoreCase = true) || raw.contains("401") ->
+                "鉴权失败：Qoder 的 jobToken 可能已失效，回 App 重新登录一次。"
+            else -> ""
+        }
+        return if (hint.isEmpty()) raw else "$raw\n\n$hint"
     }
 
     /**

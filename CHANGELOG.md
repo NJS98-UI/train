@@ -8,6 +8,24 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.4.19] - 2026-10-17
+
+### Fixed
+- **上游出错不再伪装成「200 + 空回复」**（非流式）。上游发的是
+  `event: error` + `data: "Billing daily count exceeded"`，而 `aggregateChunks`
+  只认 `choices`，于是聚合成一条空内容 —— 客户端看到 200 却没有任何字，
+  看起来像"模型不说话了 / 没转发"，实际是额度问题。
+  现在先判错：非流式下只要上游有错误帧或错误码，直接回 **502 + 原文**。
+- 新增 `extractUpstreamError`：纯字符串帧（`data: "…"`）与对象帧
+  （`data: {"error":{"message":"…"}}`）两种形状都能抠出文案。
+- 新增 `humanizeUpstreamError`：**保留上游原文**再追加可操作提示
+  （额度用尽 / 鉴权失败 / quota 不足各有对应中文），不猜、不吞。
+
+### Notes
+- 本机实测：`dfmodel` 聊天返回 `Billing daily count exceeded` ——
+  Qoder 账号**当天计费次数已用完**，这是账号状态，不是代码问题。
+- 同一时刻 `/v1/models` 正常返回 21 个模型，已覆盖官方两个区域目录的并集。
+
 ## [0.4.18] - 2026-10-17
 
 ### Fixed
