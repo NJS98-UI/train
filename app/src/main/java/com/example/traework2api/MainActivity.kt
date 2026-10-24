@@ -802,7 +802,7 @@ class MainActivity : Activity() {
                         addView(action("退出登录", outlined = true, danger = true) {
                             CopilotAuthStore.clear(this@MainActivity)
                             CopilotModelCatalog.clear()
-                            refreshPage()
+                            render(currentPage)
                             toast("已退出 Copilot")
                         }, lp(-2, dp(48)))
                     }
