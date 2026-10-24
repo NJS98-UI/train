@@ -117,6 +117,15 @@ object Gateway {
                 if (jt.isBlank()) null else c.copy(jobToken = jt)
             }
         }
+        // ---- Copilot 后端（api.githubcopilot.com）----
+        s.copilotCredProvider = {
+            locked<CopilotAuthStore.Cred?> {
+                val cred = CopilotAuthStore.load(app) ?: return@locked null
+                // 每次转发前把短时令牌续到可用（过期才真去换，未过期是纯内存判断）
+                CopilotApi.validCopilotToken(app, cred)
+                CopilotAuthStore.load(app)
+            }
+        }
         s.qoderRollback = { originalUid ->
             android.util.Log.i(TAG, "Qoder 换号后仍失败，切回原账号 $originalUid")
             locked { QoderAuthStore.setActive(app, originalUid) }

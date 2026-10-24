@@ -33,16 +33,22 @@ object GatewayBackend {
 
     const val TRAE = "trae"
     const val QODER = "qoder"
+    const val COPILOT = "copilot"
     const val AUTO = "auto"
 
     /** 用户显式选择（可能是 [AUTO]）。 */
     fun selection(ctx: Context): String {
         val v = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).getString(KEY, null)
-        return if (v == TRAE || v == QODER) v else AUTO
+        return if (v == TRAE || v == QODER || v == COPILOT) v else AUTO
     }
 
     fun set(ctx: Context, backend: String) {
-        val v = if (backend == QODER) QODER else if (backend == TRAE) TRAE else AUTO
+        val v = when (backend) {
+            QODER -> QODER
+            COPILOT -> COPILOT
+            TRAE -> TRAE
+            else -> AUTO
+        }
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY, v).apply()
     }
 
@@ -53,6 +59,17 @@ object GatewayBackend {
     fun hasTraeAccount(ctx: Context): Boolean = TraeAuthStore.load(ctx) != null
 
     fun hasQoderAccount(ctx: Context): Boolean = QoderAuthStore.load(ctx) != null
+
+    fun hasCopilotAccount(ctx: Context): Boolean = CopilotAuthStore.isLoggedIn(ctx)
+
+    /** 该模型名是否属于 Copilot 目录（id / 展示名任一命中）。 */
+    fun isCopilotModel(model: String): Boolean {
+        val m = model.trim()
+        if (m.isEmpty()) return false
+        return CopilotModelCatalog.current().any {
+            it.id.equals(m, ignoreCase = true) || it.name.equals(m, ignoreCase = true)
+        }
+    }
 
     /** 该模型名是否属于 Qoder 目录（key / 展示名 / 别名任一命中）。 */
     fun isQoderModel(model: String): Boolean {
@@ -76,15 +93,26 @@ object GatewayBackend {
      */
     fun routeFor(ctx: Context, model: String): String = when (selection(ctx)) {
         QODER -> QODER
+        COPILOT -> COPILOT
         TRAE -> TRAE
         else -> {
             val q = hasQoderAccount(ctx)
+            val c = hasCopilotAccount(ctx)
             val t = hasTraeAccount(ctx)
             when {
-                q && !t -> QODER
-                !q && t -> TRAE
-                q && t -> if (isQoderModel(model)) QODER else TRAE
-                else -> TRAE
+                // 只有一个后端有账号：全部走它（模型名无所谓，宁可让它自己报错）
+                q && !c && !t -> QODER
+                c && !q && !t -> COPILOT
+                !q && !c && t -> TRAE
+                !q && !c && !t -> TRAE
+                // 多个后端：**按模型归属**路由。顺序有讲究 ——
+                // Qoder 与 Copilot 的模型名不重叠，先认各自目录，剩下的才给 Trae
+                // （Trae 的模型表是动态拉的上游表，名字最不可控，放最后兜底）。
+                isQoderModel(model) && q -> QODER
+                isCopilotModel(model) && c -> COPILOT
+                t -> TRAE
+                q -> QODER
+                else -> COPILOT
             }
         }
     }
@@ -92,22 +120,36 @@ object GatewayBackend {
     /** 展示用：当前"主"后端（`auto` 且两个都有时按 Trae 展示）。 */
     fun resolved(ctx: Context): String = when (selection(ctx)) {
         QODER -> QODER
+        COPILOT -> COPILOT
         TRAE -> TRAE
-        else -> if (hasQoderAccount(ctx) && !hasTraeAccount(ctx)) QODER else TRAE
+        else -> when {
+            hasQoderAccount(ctx) && !hasTraeAccount(ctx) && !hasCopilotAccount(ctx) -> QODER
+            hasCopilotAccount(ctx) && !hasTraeAccount(ctx) && !hasQoderAccount(ctx) -> COPILOT
+            else -> TRAE
+        }
     }
 
     fun isQoder(ctx: Context): Boolean = resolved(ctx) == QODER
 
     /** `auto` 且两个平台都有账号 = 模型表是并集、按模型路由。 */
-    fun isMixed(ctx: Context): Boolean =
-        selection(ctx) == AUTO && hasTraeAccount(ctx) && hasQoderAccount(ctx)
+    fun isMixed(ctx: Context): Boolean {
+        if (selection(ctx) != AUTO) return false
+        val n = listOf(hasTraeAccount(ctx), hasQoderAccount(ctx), hasCopilotAccount(ctx)).count { it }
+        return n >= 2
+    }
 
     /** 后端选择的**人话**描述（UI 与日志共用）。 */
     fun describe(ctx: Context): String = when {
         selection(ctx) == QODER -> "Qoder（强制）"
+        selection(ctx) == COPILOT -> "Copilot（强制）"
         selection(ctx) == TRAE -> "Trae（强制）"
-        isMixed(ctx) -> "自动 · 按模型路由（Trae + Qoder 都在）"
+        isMixed(ctx) -> "自动 · 按模型路由（" + listOfNotNull(
+            "Trae".takeIf { hasTraeAccount(ctx) },
+            "Qoder".takeIf { hasQoderAccount(ctx) },
+            "Copilot".takeIf { hasCopilotAccount(ctx) },
+        ).joinToString(" + ") + "）"
         hasQoderAccount(ctx) -> "自动 · Qoder"
+        hasCopilotAccount(ctx) -> "自动 · Copilot"
         else -> "自动 · Trae"
     }
 
@@ -123,15 +165,24 @@ object GatewayBackend {
      */
     fun modelsFor(ctx: Context): JSONArray = when {
         selection(ctx) == QODER -> QoderModelCatalog.openAiModels()
+        selection(ctx) == COPILOT -> CopilotModelCatalog.openAiModels()
         selection(ctx) == TRAE -> ModelsRepo.current()
         else -> {
             val q = hasQoderAccount(ctx)
+            val c = hasCopilotAccount(ctx)
             val t = hasTraeAccount(ctx)
             when {
-                q && !t -> QoderModelCatalog.openAiModels()
-                !q && t -> ModelsRepo.current()
-                q && t -> merge(ModelsRepo.current(), QoderModelCatalog.openAiModels())
-                else -> ModelsRepo.current()
+                q && !c && !t -> QoderModelCatalog.openAiModels()
+                c && !q && !t -> CopilotModelCatalog.openAiModels()
+                !q && !c && t -> ModelsRepo.current()
+                !q && !c && !t -> ModelsRepo.current()
+                else -> {
+                    // 并集：Trae → Qoder → Copilot，按 id 去重
+                    var acc = if (t) ModelsRepo.current() else JSONArray()
+                    if (q) acc = merge(acc, QoderModelCatalog.openAiModels())
+                    if (c) acc = merge(acc, CopilotModelCatalog.openAiModels())
+                    acc
+                }
             }
         }
     }
@@ -163,12 +214,13 @@ object GatewayBackend {
 
     /** 模型页的"是否已加载"判定。 */
     fun modelsLoaded(ctx: Context): Boolean = when {
-        hasQoderAccount(ctx) -> true
+        hasQoderAccount(ctx) || hasCopilotAccount(ctx) -> true
         else -> ModelsRepo.isDynamic
     }
 
     fun label(backend: String): String = when (backend) {
         QODER -> "Qoder"
+        COPILOT -> "Copilot"
         TRAE -> "Trae"
         else -> "自动"
     }
@@ -201,10 +253,21 @@ object GatewayBackend {
                 }
             }
         }
+        // Copilot 目录判定：与 Qoder 目录**不能互相误判**（否则会拿错上游的模型名）
+        CopilotModelCatalog.setDynamic(listOf(CopilotModelCatalog.CModel("gpt-4o", "GPT-4o")))
+        check(isCopilotModel("gpt-4o")) { "自检失败：gpt-4o 应属于 Copilot 目录" }
+        check(!isQoderModel("gpt-4o")) { "自检失败：gpt-4o 不该被认成 Qoder 模型" }
+        check(!isCopilotModel("qmodel_38max")) { "自检失败：Qoder 模型不该被认成 Copilot 模型" }
+        CopilotModelCatalog.clear()
+        check(!isCopilotModel("gpt-4o")) { "自检失败：清空目录后不该再命中" }
+
         // 显式选择必须压倒一切
         val saved = selection(ctx)
         set(ctx, QODER)
         check(routeFor(ctx, "anything") == QODER) { "自检失败：强制 Qoder 时应无视模型名" }
+        set(ctx, COPILOT)
+        check(routeFor(ctx, "qmodel_38max") == COPILOT) { "自检失败：强制 Copilot 时应无视模型名" }
+        check(label(COPILOT) == "Copilot") { "自检失败：Copilot 标签不对" }
         set(ctx, TRAE)
         check(routeFor(ctx, "qmodel_38max") == TRAE) { "自检失败：强制 Trae 时应无视模型名" }
         set(ctx, saved)

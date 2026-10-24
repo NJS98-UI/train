@@ -267,6 +267,11 @@ class MainActivity : Activity() {
         AccountCredits.selfCheck()
         // CLI 模型缓存解密自检（HKDF-SHA256 对齐 RFC 5869 + AES-GCM 往返 + 错 uid 必须解不开）。
         QoderModelCache.selfCheck()
+        // Copilot 三件套自检：凭证过期判定 / 设备码端点与兜底 IP / 上游模型目录解析。
+        // 这三处都是"错了会静默降级"的地方（令牌过期不续 → 401；目录解析错 → 空模型表）。
+        CopilotAuthStore.selfCheck()
+        CopilotApi.selfCheck()
+        CopilotModelCatalog.selfCheck()
         // 装入按账号积分缓存：进账号页立刻有数，后台刷新再原地更新。
         AccountCredits.loadCache(this)
         // 保活页的 ROM 识别自检：SystemProperties 是隐藏 API（靠反射），读不到也不能崩。
@@ -754,6 +759,57 @@ class MainActivity : Activity() {
         })
 
         // ---- Qoder 账号 ----
+        addView(section("GitHub Copilot 账号"))
+
+        // Copilot 与 Trae/Qoder 的差别：**只有一个账号**，登录一次就行，
+        // 短时令牌由 App 自动续（用户不需要看到 "token 过期" 这种事）。
+        run {
+            val cred = CopilotAuthStore.load(this@MainActivity)
+            addView(card {
+                addView(row {
+                    addView(
+                        text(
+                            if (cred == null) "未登录" else cred.login.ifBlank { "已登录" },
+                            FS_CARD_TITLE, true,
+                        ),
+                        weighted(),
+                    )
+                    if (cred != null) {
+                        val planText = cred.plan.ifBlank { cred.sku }
+                        if (planText.isBlank()) addView(chipOk("已登录"))
+                        else addView(chipOk(planText))
+                    }
+                })
+                addView(
+                    caption(
+                        if (cred == null) {
+                            "用 GitHub 账号登录后，Copilot 的模型会出现在模型列表里，" +
+                                "聊天请求同样走本地 ${LocalFakeServer.PORT} 转发。\n" +
+                                "点下面的按钮拿设备码，在 ${CopilotApi.HOST_WEB}/login/device 输入即可。"
+                        } else {
+                            "套餐 ${cred.sku.ifBlank { "未知" }} · Copilot 令牌约 30 分钟自动续期，" +
+                                "过期会在下一次请求时无感刷新，不用手动处理。"
+                        },
+                    ),
+                    top(6),
+                )
+                addView(row(8) {
+                    addView(
+                        action(if (cred == null) "登录 GitHub" else "重新登录") { startCopilotLogin() },
+                        if (cred == null) lp(-1, dp(48)) else lp(-2, dp(48)),
+                    )
+                    if (cred != null) {
+                        addView(action("退出登录", outlined = true, danger = true) {
+                            CopilotAuthStore.clear(this@MainActivity)
+                            CopilotModelCatalog.clear()
+                            refreshPage()
+                            toast("已退出 Copilot")
+                        }, lp(-2, dp(48)))
+                    }
+                }, top(10))
+            })
+        }
+
         addView(section("Qoder 账号"))
 
         // ---- 聊天转发后端（Trae / Qoder）----
@@ -1450,10 +1506,15 @@ class MainActivity : Activity() {
                 GatewayBackend.isMixed(this@MainActivity) ->
                     "已加载 · $n 个模型（Trae ${ModelsRepo.current().length()} + Qoder " +
                         "${QoderModelCatalog.current().size}，按模型路由）"
-                GatewayBackend.hasQoderAccount(this@MainActivity) -> {
+                GatewayBackend.hasQoderAccount(this@MainActivity) &&
+                    GatewayBackend.selection(this@MainActivity) != GatewayBackend.COPILOT -> {
                     val free = QoderModelCatalog.freeCount()
                     val src = if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单"
                     "已加载 · $n 个模型（$src · $free 个免费）"
+                }
+                GatewayBackend.selection(this@MainActivity) == GatewayBackend.COPILOT -> {
+                    val src = if (CopilotModelCatalog.hasDynamic()) "Copilot 目录" else "还没拉到目录"
+                    "已加载 · $n 个模型（$src）"
                 }
                 else -> "已加载 · $n 个模型"
             }
@@ -2282,6 +2343,153 @@ class MainActivity : Activity() {
      * 失败在静默模式下是**正常边界**（离线启动很常见）—— 磁盘缓存还在顶着，
      * 客户端拿到的仍是上次刷到的清单，所以只打日志，绝不能打扰用户。
      */
+    // ------------------------------------------------------------------
+    // GitHub Copilot（设备码登录 + 目录同步）
+    // ------------------------------------------------------------------
+
+    /**
+     * 设备码登录。
+     *
+     * 流程与官方客户端一致：`/login/device/code` 拿码 → 用户去
+     * `github.com/login/device` 输入 → 本地按上游给的 `interval` 轮询
+     * `/login/oauth/access_token` → 拿到 `ghu_` 令牌。
+     *
+     * ⚠️ 轮询间隔**必须**遵守上游给的 `interval`：快了会被 `slow_down`，
+     * 而且惩罚窗口是累计的（本次调试就因为 5 秒轮询被打回十几轮）。
+     */
+    private fun startCopilotLogin() {
+        toast("正在向 GitHub 申请设备码…")
+        thread(name = "copilot-device-flow") {
+            val flow = CopilotApi.startDeviceFlow()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (flow == null) {
+                    toast("获取设备码失败：${CopilotApi.lastError ?: "未知原因"}")
+                    return@runOnUiThread
+                }
+                copyToClipboard("deviceCode", flow.userCode, "设备码已复制：${flow.userCode}")
+                val minutes = (flow.expiresIn / 60).coerceAtLeast(1)
+                val dlg = AlertDialog.Builder(this@MainActivity)
+                    .setTitle("GitHub Copilot 登录")
+                    .setMessage(
+                        "1. 打开 ${flow.verificationUri}\n" +
+                            "2. 输入设备码：${flow.userCode}（已复制）\n\n" +
+                            "有效期 $minutes 分钟。授权后这里会自动关闭，不用手动确认。",
+                    )
+                    .setPositiveButton("打开浏览器") { _, _ ->
+                        try {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(flow.verificationUri)))
+                        } catch (_: Exception) {
+                            toast("没有可用浏览器，请手动打开 ${flow.verificationUri}")
+                        }
+                    }
+                    .setNegativeButton("取消", null)
+                    .setCancelable(true)
+                    .create()
+                dlg.show()
+
+                // 后台轮询：成功的唯一标志是拿到 access_token
+                thread(name = "copilot-poll") {
+                    val deadline = System.currentTimeMillis() + flow.expiresIn * 1000L
+                    var intervalMs = flow.interval * 1000L
+                    var token: String? = null
+                    var failMsg: String? = null
+                    while (System.currentTimeMillis() < deadline) {
+                        Thread.sleep(intervalMs)
+                        when (val r = CopilotApi.pollOnce(flow.deviceCode)) {
+                            is CopilotApi.PollResult.Token -> { token = r.accessToken; break }
+                            is CopilotApi.PollResult.Pending -> Unit
+                            // 被限流：退避后再问（移动网络 NAT 共用出口 IP，很常见）
+                            is CopilotApi.PollResult.SlowDown -> {
+                                intervalMs = CopilotApi.nextInterval(intervalMs)
+                            }
+                            is CopilotApi.PollResult.Failed -> { failMsg = r.error; break }
+                        }
+                    }
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        try { dlg.dismiss() } catch (_: Exception) {}
+                        val t = token
+                        if (t == null) {
+                            toast(
+                                when {
+                                    failMsg != null -> "登录失败：$failMsg"
+                                    else -> "授权超时，请重新获取设备码"
+                                },
+                            )
+                            return@runOnUiThread
+                        }
+                        finishCopilotLogin(t)
+                    }
+                }
+            }
+        }
+    }
+
+    /** 拿到 OAuth 令牌后的收尾：换 Copilot 令牌 → 取用户名/套餐 → 落盘 → 刷目录。 */
+    private fun finishCopilotLogin(oauthToken: String) {
+        thread(name = "copilot-finish-login") {
+            val pair = CopilotApi.exchangeCopilotToken(oauthToken)
+            val info = CopilotApi.fetchUser(oauthToken)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (pair == null) {
+                    toast("登录成功但换 Copilot 令牌失败：${CopilotApi.lastError ?: "未知原因"}")
+                    return@runOnUiThread
+                }
+                CopilotAuthStore.save(
+                    this@MainActivity,
+                    CopilotAuthStore.Cred(
+                        oauthToken = oauthToken,
+                        login = info?.first.orEmpty(),
+                        sku = info?.second.orEmpty(),
+                        plan = info?.third.orEmpty(),
+                        copilotToken = pair.first,
+                        copilotExpiresAt = pair.second,
+                    ),
+                )
+                toast("GitHub Copilot 已登录：${info?.first ?: ""}".trim())
+                render(currentPage)
+                syncCopilotModels(quiet = false)
+            }
+        }
+    }
+
+    /**
+     * 同步 Copilot 模型目录。
+     *
+     * 与 Qoder 的区别：**没有内置兜底清单**。Copilot 的模型随账号套餐变化，
+     * 编一份内置表只会给出"这个账号根本没有的模型"，所以拉不到就保持上次的结果。
+     */
+    private fun syncCopilotModels(quiet: Boolean = false) {
+        val cred = CopilotAuthStore.load(this)
+        if (cred == null || !cred.chatReady) {
+            if (!quiet) toast("未登录 Copilot")
+            return
+        }
+        if (!quiet) toast("正在拉取 Copilot 模型目录…")
+        thread(name = "copilot-sync-models") {
+            val token = CopilotApi.validCopilotToken(this@MainActivity, cred)
+            val raw = token?.let { CopilotApi.fetchModels(it) }
+            val list = raw?.let { CopilotModelCatalog.parse(it) } ?: emptyList()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (list.isEmpty()) {
+                    if (!quiet) {
+                        toast(
+                            "拉取 Copilot 目录失败：" + (CopilotApi.lastError ?: "上游没返回模型")
+                                .take(80),
+                        )
+                    }
+                    return@runOnUiThread
+                }
+                CopilotModelCatalog.setDynamic(list)
+                if (!quiet) toast("Copilot 模型 ${list.size} 个")
+                render(currentPage)
+            }
+        }
+    }
+
     private fun refreshModels(quiet: Boolean = false) {
         // Qoder 后端：拉**官方目录**（含真实倍率与内置清单里没有的免费模型）。
         // 拉不到就继续用内置清单 —— 绝不因为一次网络失败把模型列表清空。
@@ -2289,8 +2497,16 @@ class MainActivity : Activity() {
             syncQoderCatalog(quiet)
             return
         }
+        // Copilot 后端：目录完全来自上游（随账号套餐变化），拉不到就保留上次的
+        if (GatewayBackend.selection(this) == GatewayBackend.COPILOT) {
+            syncCopilotModels(quiet)
+            return
+        }
         // 并集模式：Qoder 目录也顺手刷一次（异步，失败不影响下面的 Trae 刷新）
-        if (GatewayBackend.isMixed(this)) syncQoderCatalog(quiet = true)
+        if (GatewayBackend.isMixed(this)) {
+            syncQoderCatalog(quiet = true)
+            if (GatewayBackend.hasCopilotAccount(this)) syncCopilotModels(quiet = true)
+        }
         val cred = TraeAuthStore.load(this)
         if (cred == null || cred.accessToken.isBlank()) {
             if (!quiet) toast("未登录 Trae，请先登录")

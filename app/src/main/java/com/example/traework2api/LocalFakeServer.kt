@@ -86,6 +86,10 @@ class LocalFakeServer(private val apiKey: String) {
     @Volatile
     var qoderCredProvider: (() -> QoderAuthStore.QCred?)? = null
 
+    /** Copilot 凭证提供者（每次转发前调用：Copilot 令牌约 30 分钟过期，必须现取）。 */
+    @Volatile
+    var copilotCredProvider: (() -> CopilotAuthStore.Cred?)? = null
+
     /** Qoder 故障转移：上一个账号未输出就失败时换一个 Qoder 账号。 */
     @Volatile
     var qoderFailoverProvider: ((failedUid: String, err: String) -> QoderAuthStore.QCred?)? = null
@@ -493,6 +497,26 @@ class LocalFakeServer(private val apiKey: String) {
                         null
                     } ?: try { backendProvider?.invoke() } catch (_: Exception) { null }
                         ?: GatewayBackend.TRAE
+                    if (backend == GatewayBackend.COPILOT) {
+                        // ---- Copilot 后端（api.githubcopilot.com，OpenAI 兼容）----
+                        val ccred = try { copilotCredProvider?.invoke() } catch (e: Exception) {
+                            android.util.Log.w(TAG, "取 Copilot 凭证失败: ${e.javaClass.simpleName}")
+                            null
+                        }
+                        if (ccred == null || !ccred.chatReady) {
+                            writeJson(out, 502, openAIError(
+                                "upstream_unavailable",
+                                "GitHub Copilot 未登录。请回 App「账号 → GitHub Copilot」完成一次设备码登录。", 502))
+                        } else {
+                            try {
+                                streamingCopilotChat(out, body, ccred)
+                            } catch (e: Exception) {
+                                android.util.Log.w(TAG, "Copilot 转发失败: ${e.javaClass.simpleName}: ${e.message}")
+                                try { writeJson(out, 502, openAIError("upstream_error", "Copilot 转发失败", 502)) } catch (_: Exception) {}
+                            }
+                        }
+                        return
+                    }
                     if (backend == GatewayBackend.QODER) {
                         // ---- Qoder 后端（COSY 签名链路）----
                         val qcred = try { qoderCredProvider?.invoke() } catch (e: Exception) {
@@ -756,6 +780,36 @@ class LocalFakeServer(private val apiKey: String) {
      * 与 Trae 的差别只有"上游怎么打"，控制流共用 [streamWithFailover]。
      * 401 时由 [QoderAuthApi.forceRefreshJobToken] 强制续一次再重试（续不动就报错）。
      */
+    /** 走 GitHub Copilot 转发（OpenAI 兼容，控制流复用 [streamWithFailover]）。 */
+    private fun streamingCopilotChat(out: OutputStream, body: String, cred: CopilotAuthStore.Cred) {
+        val ctx = appContext ?: throw IllegalStateException("Copilot 转发缺少 Context")
+        val src = parseBodyOr400(out, body) ?: return
+        val wantsStream = src.optBoolean("stream", false)
+        val model = src.optString("model", "")
+        var cur = cred
+        streamWithFailover(
+            out = out,
+            wantsStream = wantsStream,
+            model = model,
+            runUpstream = { emit, done ->
+                CopilotUpstream.chatStream(
+                    context = ctx,
+                    clientBody = src,
+                    cred = cur,
+                    out = emit,
+                    onResult = done,
+                    refreshToken = {
+                        CopilotApi.validCopilotToken(ctx, cur, force = true)?.also { t ->
+                            cur = cur.copy(copilotToken = t)
+                        }
+                    },
+                )
+            },
+            tryFailover = { false },   // 单账号，没有可换的
+            onRollback = { },
+        )
+    }
+
     private fun streamingQoderChat(out: OutputStream, body: String, cred: QoderAuthStore.QCred) {
         val ctx = appContext ?: throw IllegalStateException("Qoder 转发缺少 Context")
         val src = parseBodyOr400(out, body) ?: return

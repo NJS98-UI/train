@@ -8,6 +8,22 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.5.0] - 2026-10-17
+
+### Added
+- **GitHub Copilot 后端**：本地网关现在支持第三个上游，Trae / Qoder / Copilot 三选一，
+  `auto` 模式下按模型归属自动路由（三个平台的模型都出现在 `/v1/models` 里）。
+  - 登录：App 内**设备码授权**（`github.com/login/device` 输一次码，全程不用填密码/Token）。
+  - 令牌：`ghu_` OAuth 令牌换 30 分钟的 Copilot 令牌，**过期自动续**，用户无感。
+  - 模型目录：完全取自上游 `GET /models`（随账号套餐变化，不编内置表）。
+  - 聊天：`api.githubcopilot.com/chat/completions`，OpenAI 兼容，流式/非流式与另两个后端一致。
+
+### Fixed
+- 设备码轮询被上游 `slow_down` 限流时**必须退避**（每次 +5 秒，封顶 60 秒）。
+  移动网络出口 IP 是 NAT 共用，限流窗口可能很长，不退避会一直卡在登录中。
+- `github.com` 在部分网络下默认解析到被阻断的 IP：登录链路加了**按 IP 兜底**，
+  系统解析结果仍保留在末尾，只是把已知可用 IP 前置。
+
 ## [0.4.21] - 2026-10-17
 
 ### Changed
