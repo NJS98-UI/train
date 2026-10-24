@@ -4,7 +4,7 @@
 > 纯原生 Android 实现（Kotlin），**无需 Python、无需 Docker、无需电脑**——装到手机上就能跑。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/version-0.4.15-green.svg)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/version-0.4.16-green.svg)](CHANGELOG.md)
 
 ---
 
@@ -39,7 +39,8 @@
 ## 功能一览
 
 - **OpenAI 兼容**：`/v1/chat/completions`（流式 SSE / 非流式 JSON / 工具调用）、`/v1/models`、`/healthz`
-- **双后端**：`Trae` 与 `Qoder` 都能当聊天上游，账号页一键切换（`自动` 按已登录账号决定）；
+- **双后端**：`Trae` 与 `Qoder` 都能当聊天上游；`自动` 模式下两个平台都登了时
+  **按模型自动路由**（模型表是并集，请求 Qoder 的模型就走 Qoder，其余走 Trae），也可强制指定；
   Qoder 走 COSY `/algo/` 签名链路（自定义 base64 + 三段交换 + MD5 签名 + AES/RSA 运行时字段）
 - **多账号**：同时保存多个 Trae 国服 / 国际账号与多个 Qoder 账号，一键切换；
   当前账号 token 失效或限流时**自动换号重试**

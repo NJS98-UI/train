@@ -70,6 +70,16 @@ class LocalFakeServer(private val apiKey: String) {
     var backendProvider: (() -> String)? = null
 
     /**
+     * **按模型**路由（`auto` 后端用）：入参 = 客户端请求的 `model`，返回 `trae` / `qoder`。
+     *
+     * 为什么需要它：两个平台都有账号时，模型表是并集，必须按模型名决定发给哪个上游；
+     * 只按"当前后端"一个值路由，会让 Qoder 模型被丢给 Trae（必然 4xx）。
+     * 返回 null 时回退到 [backendProvider]。
+     */
+    @Volatile
+    var backendForModelProvider: ((String) -> String)? = null
+
+    /**
      * Qoder 凭证提供者：每次转发前取「当下有效」的 jobToken（必要时续期）。
      * 与 [credProvider] 并列，两者按后端二选一调用。
      */
@@ -465,7 +475,15 @@ class LocalFakeServer(private val apiKey: String) {
                             "请求体过大（上限 ${MAX_BODY_BYTES / 1024 / 1024} MB）", 413))
                         return
                     }
-                    val backend = try { backendProvider?.invoke() } catch (_: Exception) { null }
+                    // `auto` 后端按**模型**路由，所以这里得先把 model 抠出来。
+                    // 解析失败不致命：路由回退到"当前后端"，聊天链路的解析会自己报错。
+                    val modelName = try { JSONObject(body).optString("model", "") } catch (_: Exception) { "" }
+                    val backend = try {
+                        backendForModelProvider?.invoke(modelName)
+                    } catch (e: Exception) {
+                        android.util.Log.w(TAG, "后端路由失败: ${e.javaClass.simpleName}: ${e.message}")
+                        null
+                    } ?: try { backendProvider?.invoke() } catch (_: Exception) { null }
                         ?: GatewayBackend.TRAE
                     if (backend == GatewayBackend.QODER) {
                         // ---- Qoder 后端（COSY 签名链路）----
@@ -474,7 +492,13 @@ class LocalFakeServer(private val apiKey: String) {
                             null
                         }
                         if (qcred == null || !qcred.chatReady) {
-                            writeJson(out, 200, fakeCompletion())
+                            // ⚠️ 绝不能回假回复：那会让"根本没转发"看起来像"转发成功但答案是假的"，
+                            // 用户完全查不出问题（本次就是踩了这个坑）。
+                            android.util.Log.w(TAG, "Qoder 后端但没有可用凭证（uid/ jobToken 为空）")
+                            writeJson(out, 502, openAIError(
+                                "upstream_unavailable",
+                                "Qoder 账号不可用：jobToken 为空或已失效。请回 App 重新登录 Qoder，" +
+                                    "或在「聊天转发后端」里切到 Trae。", 502))
                         } else {
                             try {
                                 streamingQoderChat(out, body, qcred)

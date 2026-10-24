@@ -761,18 +761,24 @@ class MainActivity : Activity() {
         run {
             val now = GatewayBackend.resolved(this@MainActivity)
             val isQ = now == GatewayBackend.QODER
+            val mixed = GatewayBackend.isMixed(this@MainActivity)
             addView(card(tone = CardTone.SOFT) {
                 addView(row {
                     addView(text("聊天转发后端", FS_CARD_TITLE, true), weighted())
-                    addView(chipInfo(GatewayBackend.label(now)))
+                    addView(chipInfo(GatewayBackend.describe(this@MainActivity)))
                 })
                 addView(caption(
-                    if (isQ) "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Qoder**（COSY 签名链路），" +
-                        "模型表 ${QoderModelCatalog.current().size} 个（" +
-                        (if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单") +
-                        "，${QoderModelCatalog.freeCount()} 个免费）；不需要 Trae 登录。"
-                    else "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Trae**（solo_work_remote），" +
-                        "模型表来自「模型」页刷新；Qoder 账号此刻不参与转发（要转发点下面的按钮切后端）。"
+                    when {
+                        mixed -> "本地 ${LocalFakeServer.PORT} 网关**按模型自动路由**：两个平台的模型都出现在 " +
+                            "`/v1/models` 里，客户端请求 Qoder 的模型就发给 Qoder（COSY 签名），" +
+                            "其余发给 Trae。不用手动切。"
+                        isQ -> "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Qoder**（COSY 签名链路），" +
+                            "模型表 ${QoderModelCatalog.current().size} 个（" +
+                            (if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单") +
+                            "，${QoderModelCatalog.freeCount()} 个免费）；不需要 Trae 登录。"
+                        else -> "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Trae**（solo_work_remote），" +
+                            "模型表来自「模型」页刷新；Qoder 账号此刻不参与转发（要转发点下面的按钮切后端）。"
+                    }
                 ), top(6))
                 addView(row(8) {
                     addView(action(if (isQ) "切到 Trae" else "切到 Qoder", outlined = true) {
@@ -1424,12 +1430,16 @@ class MainActivity : Activity() {
         val countView = caption("")
         fun refreshCountLabel() {
             val n = GatewayBackend.modelsFor(this@MainActivity).length()
-            countView.text = if (GatewayBackend.isQoder(this@MainActivity)) {
-                val free = QoderModelCatalog.freeCount()
-                val src = if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单"
-                "已加载 · $n 个模型（$src · $free 个免费）"
-            } else {
-                "已加载 · $n 个模型"
+            countView.text = when {
+                GatewayBackend.isMixed(this@MainActivity) ->
+                    "已加载 · $n 个模型（Trae ${ModelsRepo.current().length()} + Qoder " +
+                        "${QoderModelCatalog.current().size}，按模型路由）"
+                GatewayBackend.hasQoderAccount(this@MainActivity) -> {
+                    val free = QoderModelCatalog.freeCount()
+                    val src = if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单"
+                    "已加载 · $n 个模型（$src · $free 个免费）"
+                }
+                else -> "已加载 · $n 个模型"
             }
         }
         val refreshBtn = action(REFRESH_MODELS_LABEL) { refreshModels() }
@@ -1449,7 +1459,7 @@ class MainActivity : Activity() {
         // Qoder 后端：官方目录的来源说明 + 导入/诊断入口。
         // 为什么单独一张卡：官方 UI 的名字 ≠ 请求用的 key，倍率也只有官方目录才准；
         // 用户遇到"对不上"时必须有个地方能导入真目录、能看见上游到底回了什么。
-        if (GatewayBackend.isQoder(this@MainActivity)) {
+        if (GatewayBackend.hasQoderAccount(this@MainActivity)) {
             addView(card(tone = CardTone.SOFT) {
                 addView(text("官方模型目录", FS_CARD_TITLE, true))
                 addView(caption("官方 UI 上显示的名字只是**展示名**，请求要的是 key；倍率同理，" +
@@ -1464,7 +1474,7 @@ class MainActivity : Activity() {
         val notLoaded = card {
             addView(text("模型目录尚未加载", FS_CARD_TITLE, true))
             addView(caption(
-                if (GatewayBackend.isQoder(this@MainActivity)) {
+                if (GatewayBackend.hasQoderAccount(this@MainActivity)) {
                     "点「$REFRESH_MODELS_LABEL」从 Qoder 官方拉目录（含每个模型的倍率，" +
                         "以及内置清单里没有的免费模型）。拉不到会继续用内置 " +
                         "${QoderModelCatalog.BUILTIN.size} 个。"
@@ -1488,7 +1498,7 @@ class MainActivity : Activity() {
 
         // Qoder 后端首次进本页：自动拉一次官方目录（含倍率 + 内置清单没有的免费模型）。
         // 每进程只试一次：拉不到就安静地用内置清单，不要每次切页都打上游。
-        if (GatewayBackend.isQoder(this@MainActivity) && !qoderCatalogAutoTried) {
+        if (GatewayBackend.hasQoderAccount(this@MainActivity) && !qoderCatalogAutoTried) {
             qoderCatalogAutoTried = true
             syncQoderCatalog(quiet = true)
         }
@@ -1574,7 +1584,10 @@ class MainActivity : Activity() {
         })
         // ⚠️ 必须显式 this@MainActivity：这里是 card { } 的 LinearLayout 接收者作用域，
         //    裸 this 是容器不是 Context，编译期直接报 argument type mismatch。
-        val backendTag = if (GatewayBackend.isQoder(this@MainActivity)) "qoder" else "trae-solo"
+        // 并集模式下每条模型自带来源（merge 时补的 owned_by）；单后端时按当前后端标
+        val backendTag = m.optString("owned_by", "").ifBlank {
+            if (GatewayBackend.isQoder(this@MainActivity)) "qoder" else "trae-solo"
+        }
         val pfText = if (pf == null) "倍率未知" else if (pf <= 0.0) "免费（0 倍率）" else "倍率 ×${priceText(pf)}"
         val keyNote = if (unverified) " · key 未验证" else ""
         addView(caption("context ${m.optInt("context_length", 0)} · $pfText · $backendTag$keyNote"), top(4))
@@ -2260,6 +2273,8 @@ class MainActivity : Activity() {
             syncQoderCatalog(quiet)
             return
         }
+        // 并集模式：Qoder 目录也顺手刷一次（异步，失败不影响下面的 Trae 刷新）
+        if (GatewayBackend.isMixed(this)) syncQoderCatalog(quiet = true)
         val cred = TraeAuthStore.load(this)
         if (cred == null || cred.accessToken.isBlank()) {
             if (!quiet) toast("未登录 Trae，请先登录")

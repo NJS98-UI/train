@@ -96,6 +96,8 @@ object Gateway {
         s.appContext = app
         s.modelsProvider = { GatewayBackend.modelsFor(app) }
         s.backendProvider = { GatewayBackend.resolved(app) }
+        // `auto` 时按模型名路由：Qoder 目录里的模型走 COSY，其余走 Trae。
+        s.backendForModelProvider = { model -> GatewayBackend.routeFor(app, model) }
         s.qoderCredProvider = {
             locked<QoderAuthStore.QCred?> {
                 val cred = QoderAuthStore.load(app) ?: return@locked null

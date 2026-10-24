@@ -8,6 +8,36 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.4.16] - 2026-10-17
+
+### Changed
+- **`auto` 后端改为「按模型路由」**（这是本次的核心修复）。
+  - 旧行为：`auto` = 有 Trae 账号就走 Trae。结果同时登了两个平台的用户，
+    本地 `/v1/models` 只吐出 Trae 的表 —— **刚导入的 Qoder 模型一个都看不到**，
+    而"后端被静默决定了"这件事用户根本无从得知。这就是"用本地转发获取不到这些模型"。
+  - 新行为：`auto` 且两个平台都有账号时，`/v1/models` 返回**并集**
+    （Trae 表在前、Qoder 独有模型按 id 去重后追加，每条补 `owned_by` 来源标注），
+    聊天请求按 `model` 归属路由：Qoder 目录里的模型（key / 展示名 / 别名任一命中）
+    走 COSY 签名链路，其余走 Trae。模型名两边都有时 Trae 优先（老用户行为不变）。
+  - `GatewayBackend` 新增 `routeFor(ctx, model)` / `isMixed` / `hasQoderAccount` /
+    `hasTraeAccount` / `isQoderModel` / `describe`；`modelsFor` 改为并集。
+  - 强制 `trae` / `qoder` 仍然压倒一切（不受模型名影响）。
+- `LocalFakeServer`：新增 `backendForModelProvider`（按模型路由），旧 `backendProvider` 保留兜底。
+- 模型页：`owned_by` 决定卡片 tag；「官方模型目录」卡改成**有 Qoder 账号就显示**
+  （不再要求"当前后端是 Qoder"）；并集模式下「刷新模型」同时刷 Trae 表和 Qoder 目录。
+
+### Fixed
+- **Qoder 后端拿不到凭证时回假回复（200）** —— 这是个"错误被伪装成成功"的坑：
+  用户看到的是固定测试文案，以为"转发成功但答案是假的"，实际**根本没有转发**。
+  现在明确回 **502 + 原因**（"Qoder 账号不可用：jobToken 为空或已失效"）。
+- `GatewayBackend.merge`：Qoder 条目漏标 `owned_by`（导致模型页 tag 显示成 trae-solo）。
+
+### Notes
+- 切到并集后，**客户端要重新拉一次模型列表**（多数客户端会缓存 `/v1/models`），
+  否则它手里还是旧的 Trae 表。
+- `GatewayBackend.selfCheck` 补了路由判据：Qoder 目录模型/别名必须认成 Qoder 模型、
+  只登 Qoder 时任何模型都路由到 Qoder、没有 Qoder 账号时不许路由到 Qoder、强制档压倒模型名。
+
 ## [0.4.15] - 2026-10-17
 
 ### Added
