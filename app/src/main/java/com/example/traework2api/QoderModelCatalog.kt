@@ -148,12 +148,22 @@ object QoderModelCatalog {
             val d = byKey[b.key]
             out.add(
                 if (d == null) b else b.copy(
-                    name = d.name.ifBlank { b.name },
-                    contextLength = if (d.contextLength > 0) d.contextLength else b.contextLength,
-                    reasoning = d.reasoning,
-                    priceFactor = d.priceFactor,
-                    // 官方目录里出现过 = 这个 key 是真的；旧名字继续当别名留着
-                    aliases = (b.aliases + d.name + b.name).distinct().filter { it != d.name || it == b.name },
+                    // ⚠️ 名称与倍率**以内置清单为准**（那是官方 APP 里显示的值）。
+                    // 上游目录返回的是英文名 + 基础价（Ultimate / Performance / Efficient，
+                    // 倍率也不含促销与套餐调整），拿它覆盖会变成"和官方 APP 对不上" ——
+                    // 这正是用户反复报的那个问题。
+                    name = b.name,
+                    // 上下文只在"内置没写"或"上游更大"时更新：这是纯增益，不会显示成错的值。
+                    contextLength = when {
+                        b.contextLength <= 0 -> d.contextLength
+                        d.contextLength > b.contextLength -> d.contextLength
+                        else -> b.contextLength
+                    },
+                    // 推理位同理：内置是官方快照值，上游缺失(false)时不能把 true 冲掉
+                    reasoning = b.reasoning || d.reasoning,
+                    priceFactor = b.priceFactor ?: d.priceFactor,
+                    // 上游出现的名字当别名留着，客户端按旧名/英文名请求也能命中
+                    aliases = (b.aliases + d.name).distinct().filter { it.isNotBlank() && it != b.name },
                     unverified = false,
                 ),
             )
@@ -489,9 +499,13 @@ object QoderModelCatalog {
         // 解析出 4 条：auto（内置已有，覆盖）+ free-model/paid/team-only（新增 3）→ 20 + 3
         check(merged.size == 20 + 3) { "自检失败：合并后应为内置20 + 新3，实际 ${merged.size}" }
         check(merged.first().key == DEFAULT_KEY) { "自检失败：合并后默认模型必须仍在最前" }
-        check(merged.first { it.key == "auto" }.priceFactor == 0.0) {
-            "自检失败：同 key 应被上游倍率覆盖（auto 0.0）"
+        // 同 key：名称/倍率**保留内置值**（官方 APP 显示值），不被上游英文名/基础价覆盖
+        check(merged.first { it.key == "auto" }.priceFactor == 0.5) {
+            "自检失败：同 key 的倍率应保留内置值（auto 0.5），实际 ${merged.first { it.key == "auto" }.priceFactor}"
         }
+        check(merged.first { it.key == "auto" }.name == "Auto") { "自检失败：内置名称被覆盖了" }
+        // 上游英文名进别名：内置叫「极致」，客户端按 Ultimate 请求也要命中
+        check(resolve("Ultimate").key == "ultimate") { "自检失败：英文名 Ultimate 应能解析到 ultimate" }
         check(merged.last().key == "team-only") { "自检失败：新 key 应追加到末尾" }
 
         // 应用动态目录后：新模型可解析、倍率生效、免费数正确
@@ -499,8 +513,9 @@ object QoderModelCatalog {
         check(current().size == 23) { "自检失败：动态目录条数不对，实际 ${current().size}" }
         check(resolve("Free Model").key == "free-model") { "自检失败：新模型按展示名解析失败" }
         check(byKey("free-model")?.free == true) { "自检失败：新免费模型未标记免费" }
-        // 动态目录里 auto / free-model 都是 0，加上内置的 dfmodel / qfmodel → 4
-        check(freeCount() == 4) { "自检失败：免费模型数应为 4（内置2 + 目录2），实际 ${freeCount()}" }
+        // 内置免费的 qfmodel / dfmodel（2）+ 目录新增的 free-model（1）= 3；
+        // auto 上游说 0.0，但内置（官方 APP 显示）是 0.5，按内置算 —— 所以不额外加 1
+        check(freeCount() == 3) { "自检失败：免费模型数应为 3（内置2 + 目录1），实际 ${freeCount()}" }
 
         // 空/垃圾输入绝不能把目录清空
         check(parseCatalogJson("").isEmpty()) { "自检失败：空串应解析为空" }
