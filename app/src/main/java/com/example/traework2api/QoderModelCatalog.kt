@@ -381,18 +381,26 @@ object QoderModelCatalog {
         val arr = JSONArray()
         val created = System.currentTimeMillis() / 1000
         for (m in current()) {
+            // `id` 用**官方显示名**，不用内部 key。
+            // 为什么：客户端模型下拉框只显示 id，给 `qfmodel` / `smodel` 这种缩写，
+            // 用户根本认不出是哪个模型（"名字变了，不知道谁对应谁"）。
+            // 转发不受影响：resolve() 先按 key 再按展示名再按别名匹配，三种都能命中。
+            val publicId = m.name.ifBlank { m.key }
             val o = JSONObject()
-                .put("id", m.key)
+                .put("id", publicId)
                 .put("object", "model")
                 .put("created", created)
                 .put("owned_by", "qoder")
                 .put("name", m.name)
+                .put("key", m.key)
                 .put("context_length", m.contextLength)
                 .put("is_free", m.free)
             // 倍率未知时**不写字段**：让展示层显示「倍率未知」，而不是编一个 ×1
             m.priceFactor?.let { o.put("price_factor", it) }
             if (m.unverified) o.put("unverified", true)
-            if (m.aliases.isNotEmpty()) o.put("aliases", JSONArray(m.aliases))
+            // 别名里带上内部 key，兼容"直接填 key"的老客户端
+            val aliases = (listOf(m.key) + m.aliases).distinct().filter { it != publicId }
+            if (aliases.isNotEmpty()) o.put("aliases", JSONArray(aliases))
             arr.put(o)
         }
         return arr
@@ -530,7 +538,14 @@ object QoderModelCatalog {
         check(models.length() == 20) { "自检失败：/v1/models 条数不对" }
         val first = models.getJSONObject(0)
         check(first.getString("object") == "model") { "自检失败：object 字段必须是 model" }
-        check(first.getString("id") == DEFAULT_KEY) { "自检失败：首个模型 id 不对" }
+        // id 现在是**官方显示名**（客户端下拉框只显示 id，给内部 key 用户认不出）
+        check(first.getString("id") == "Auto") { "自检失败：首个模型 id 应为官方名 Auto，实际 ${first.optString("id")}" }
+        check(first.getString("key") == DEFAULT_KEY) { "自检失败：key 字段应保留内部 key" }
+        // 官方名必须能解析回 key（客户端拿 id 直接请求）
+        check(resolve(first.getString("id")).key == DEFAULT_KEY) { "自检失败：按官方名解析不回默认 key" }
+        check(resolve("极致").key == "ultimate") { "自检失败：按官方中文名解析失败" }
+        check(resolve("Qwen3.8-Flash").key == "qfmodel") { "自检失败：按官方英文名解析失败" }
+        check(resolve("qfmodel").key == "qfmodel") { "自检失败：按内部 key 仍须能解析" }
         check(first.optInt("context_length", 0) > 0) { "自检失败：context_length 缺失（模型页要用）" }
         check(first.has("price_factor")) { "自检失败：price_factor 缺失（模型页要显示倍率）" }
 

@@ -1475,15 +1475,12 @@ class MainActivity : Activity() {
         // Qoder 后端：官方目录的来源说明 + 导入/诊断入口。
         // 为什么单独一张卡：官方 UI 的名字 ≠ 请求用的 key，倍率也只有官方目录才准；
         // 用户遇到"对不上"时必须有个地方能导入真目录、能看见上游到底回了什么。
-        if (GatewayBackend.hasQoderAccount(this@MainActivity)) {
+        // 只在**拉取失败**时露出一条排查入口：正常能拉到就什么都不显示（用户明确要求别摆多余的东西）
+        if (!QoderModelCatalog.hasDynamic() && QoderAuthApi.lastCatalogError != null) {
             addView(card(tone = CardTone.SOFT) {
-                addView(text("官方模型目录", FS_CARD_TITLE, true))
-                addView(caption("进这个页面会**自动**从官方拉一次目录（COSY 签名直连，与桌面版模型选择器同源），" +
-                    "拿到的是准确 key + 当前倍率 + 上下文，不用你做任何事。"), top(6))
-                addView(action("立即同步官方目录", outlined = true, full = true) { refreshModels() }, top(10))
-                addView(caption("同步失败才需要兜底：导入 Qoder CLI 的缓存文件（一段 base64，整段粘贴，App 自己解密）。"), top(10))
-                addView(linkAction("导入 catalog-v7（兜底）") { promptImportCatalog() }, top(8))
-                addView(linkAction("查看上次拉取的原文（排查用）") { showLastCatalogRaw() }, top(8))
+                addView(caption("自动拉取官方目录失败，当前用内置 ${QoderModelCatalog.BUILTIN.size} 个模型。"))
+                addView(linkAction("查看失败原因") { showLastCatalogRaw() }, top(6))
+                addView(linkAction("手动导入 catalog-v7（兜底）") { promptImportCatalog() }, top(6))
             }, top(GAP))
         }
 
@@ -1579,6 +1576,8 @@ class MainActivity : Activity() {
     private fun modelCard(m: org.json.JSONObject): View = card {
         val id = m.optString("id", "").ifBlank { m.optString("config_name", "") }
         val name = m.optString("name", "").ifBlank { id }
+        // `id` 现在是官方显示名；副行展示内部 key（排查/兼容老客户端时要用）
+        val key = m.optString("key", "").ifBlank { id }
         // 官方标注的倍率：0 = 免费（Qoder 目录里确实有这种）。
         // 缺字段时**不显示**而不是显示 ×1 —— 显示错误的倍率比不显示更误导。
         val pf = if (m.has("price_factor")) m.optDouble("price_factor", 1.0) else null
@@ -1593,7 +1592,7 @@ class MainActivity : Activity() {
             }
         })
         addView(row(4) {
-            addView(mono(id, FS_CHIP, colorName = "on_surface_variant").apply {
+            addView(mono(key, FS_CHIP, colorName = "on_surface_variant").apply {
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
             }, weighted())
