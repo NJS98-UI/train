@@ -399,15 +399,42 @@ object QoderAuthApi {
         val ok: Boolean get() = status == "ok"
     }
 
-    /** GET 带 Bearer。刻意不带 Cosy-Machine* 头：伪造派生指纹会被 campaigns 服务静默过滤（见 Qoder-2API-Go），干净请求反而能领通用活动。 */
-    private fun getForCampaigns(url: String, bearer: String): String {
-        val req = Request.Builder().url(url).get()
+    /**
+     * 国际版请求要带**真实**设备指纹；国内版绝不能带。
+     *
+     * 社区单变量对照实验（Qoder-2API-Go，2026-10-13）：
+     *  - 国内版：带自造指纹 → 不下发活动；不带 → 正常下发 ✅
+     *  - 国际版：不带 → 不下发；带官方客户端真实指纹 → 正常下发 ✅；自造指纹无效
+     * 所以：CN 走干净请求，Global 仅在**回填了真实指纹**时才加 cosy-machine* 头。
+     */
+    private fun applyMachineHeaders(
+        b: Request.Builder,
+        mode: String,
+        id: QoderMachine.Identity?,
+    ): Request.Builder {
+        if (mode != MODE_GLOBAL || id == null) return b
+        var out = b
+            .header("User-Agent", "Qoder")
+            .header("Cosy-Version", id.version)
+            .header("Cosy-ClientType", id.clientType)
+            .header("Cosy-MachineId", id.machineId)
+            .header("Cosy-MachineToken", id.machineToken)
+            .header("Cosy-MachineOS", id.machineOS)
+        // 官方无 umid 时这两项留空，空串头会被某些网关当成异常，干脆不发
+        if (id.machineType.isNotBlank()) out = out.header("Cosy-MachineType", id.machineType)
+        if (id.hostname.isNotBlank()) out = out.header("Cosy-MachineHostname", id.hostname)
+        return out
+    }
+
+    /** GET 带 Bearer。国内走干净请求（不带 Cosy-Machine*），国际版在有真实指纹时附带。 */
+    private fun getForCampaigns(url: String, bearer: String, mode: String, id: QoderMachine.Identity?): String {
+        val base = Request.Builder().url(url).get()
             .header("Authorization", "Bearer $bearer")
             .header("Accept", JSON)
             .header("User-Agent", "traework2api")
             .header("Cosy-Version", "1.0.1")
             .header("Cosy-ClientType", "10")
-            .build()
+        val req = applyMachineHeaders(base, mode, id).build()
         client.newCall(req).execute().use { r ->
             val text = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw java.io.IOException("Qoder ${r.code}: ${text.take(200)}")
@@ -416,8 +443,8 @@ object QoderAuthApi {
     }
 
     /** POST 带 Bearer + JSON body（claim 用，body 传空对象）。 */
-    private fun postBearer(url: String, bearer: String, body: JSONObject): String {
-        val req = Request.Builder().url(url)
+    private fun postBearer(url: String, bearer: String, body: JSONObject, mode: String, id: QoderMachine.Identity?): String {
+        val base = Request.Builder().url(url)
             .post(body.toString().toRequestBody(JSON.toMediaType()))
             .header("Authorization", "Bearer $bearer")
             .header("Content-Type", JSON)
@@ -425,7 +452,7 @@ object QoderAuthApi {
             .header("User-Agent", "traework2api")
             .header("Cosy-Version", "1.0.1")
             .header("Cosy-ClientType", "10")
-            .build()
+        val req = applyMachineHeaders(base, mode, id).build()
         client.newCall(req).execute().use { r ->
             val text = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw java.io.IOException("Qoder ${r.code}: ${text.take(200)}")
@@ -438,16 +465,16 @@ object QoderAuthApi {
      * 国际/国内同走干净请求（不带 Cosy-Machine* 头）：伪指纹会让服务端静默隐藏「每天领」活动，
      * 无指纹则通用活动保持可见；「每天领 100 Credits」这类仅原生桌面端身份下发的活动会正常缺席。
      */
-    private fun fetchCampaigns(jt: String, mode: String): List<QCampaign> {
+    private fun fetchCampaigns(jt: String, mode: String, id: QoderMachine.Identity?): List<QCampaign> {
         val url = openApiBase(mode) + EP_CAMPAIGNS + "?forceRefresh=true"
-        val text = getForCampaigns(url, jt)
+        val text = getForCampaigns(url, jt, mode, id)
         return parseCampaigns(JSONObject(text))
     }
 
     /** 领一条活动。body 固定 {}（幂等）。返回本次入账额度（replayed 时为 0）。 */
-    private fun claimOne(jt: String, mode: String, campaignId: String): Pair<Boolean, Long> {
+    private fun claimOne(jt: String, mode: String, campaignId: String, id: QoderMachine.Identity?): Pair<Boolean, Long> {
         val url = openApiBase(mode) + EP_CAMPAIGNS + "/" + campaignId + "/claim"
-        val text = postBearer(url, jt, JSONObject())
+        val text = postBearer(url, jt, JSONObject(), mode, id)
         return parseClaim(JSONObject(text))
     }
 
@@ -494,8 +521,13 @@ object QoderAuthApi {
         // 活动在没有原生指纹时服务端会正常缺席，但其它通用活动仍可领；无需再对国际版硬挡 unsupported。
         val jt = validJobTokenFor(context, cred, skewMillis = 60_000L)
         if (jt.isNullOrBlank()) return QClaimResult("fail", 0, "没有有效 token，请重新粘贴 PAT 登录")
+        // 国际版：带机器身份（有抓包真货用真货，否则用官方无-umid 的等价身份）。
+        // 国内版刻意不带 —— 对照实验里国内带指纹反而 no_campaign。
+        val identity = if (cred.mode == MODE_GLOBAL) {
+            QoderMachine.identity(context, QoderAuthStore.fingerprint(context, cred.uid))
+        } else null
         val campaigns = try {
-            fetchCampaigns(jt, cred.mode)
+            fetchCampaigns(jt, cred.mode, identity)
         } catch (e: Exception) {
             return QClaimResult("fail", 0, "拉取活动失败：${e.message ?: e.javaClass.simpleName}")
         }
@@ -506,7 +538,11 @@ object QoderAuthApi {
             // 仅 Qoder 桌面端/CLI 能生成）的请求；手机端伪造不出来，服务端会 200 但把活动隐藏。
             // 所以这里必须如实说清楚，不能写成"可能已领" —— 那会让人以为明天再来就有了。
             val why = if (cred.mode == MODE_GLOBAL) {
-                "国际版每日领取仅桌面端可领（缺原生设备标识），手机端看不到该活动"
+                if (identity?.fromCapture == true) {
+                    "已带真实设备指纹但仍无活动：指纹可能过期或与账号不匹配，请重新抓包回填"
+                } else {
+                    "国际版无可见活动：本机身份未被接受，可从 Qoder 桌面端抓包回填真实指纹再试"
+                }
             } else {
                 "今日无可领活动（可能已领或未到 10:00 领取窗口）"
             }
@@ -517,7 +553,7 @@ object QoderAuthApi {
         var lastErr: String? = null
         for (c in claimable) {
             try {
-                val (newly, amt) = claimOne(jt, cred.mode, c.id)
+                val (newly, amt) = claimOne(jt, cred.mode, c.id, identity)
                 if (newly) { total += amt; fresh++ }
             } catch (e: Exception) {
                 lastErr = e.message ?: e.javaClass.simpleName

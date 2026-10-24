@@ -274,6 +274,7 @@ class MainActivity : Activity() {
         AccountCredits.loadCache(this)
         // 启动补签的日期闸门自检（写错就变成"每次前台都签"，会一直打上游）。
         AutoCheckin.selfCheck()
+        QoderMachine.selfCheck()
         // 保活页的 ROM 识别自检：SystemProperties 是隐藏 API（靠反射），读不到也不能崩。
         KeepAlive.selfCheck()
 
@@ -626,6 +627,13 @@ class MainActivity : Activity() {
                 }
                 addView(caption("积分"), top(10))
                 addView(qoderCreditView!!, top(2))
+                // 国际版领取要机器身份：默认用官方 CLI 同构的本机派生，抓包有真货可覆盖
+                if (qActiveMeta != null && qActiveMeta.mode == QoderAuthApi.MODE_GLOBAL) {
+                    val captured = QoderAuthStore.fingerprint(this@MainActivity, qActiveMeta.uid) != null
+                    addView(linkAction(if (captured) "设备身份：抓包指纹" else "设备身份：本机派生") {
+                        promptQoderFingerprint(qActiveMeta.uid)
+                    }, top(12))
+                }
             })
             addView(accountBar("账户选择") { showQoderAccountPicker() }, top(8))
         }
@@ -859,6 +867,59 @@ class MainActivity : Activity() {
             } catch (_: Exception) {
                 copyToClipboard("qoderUrl", "https://qoder.com/account/integrations", "链接已复制，请用浏览器打开")
             }
+        }
+    }
+
+    /**
+     * Qoder 设备身份（国际版领取必需）。
+     *
+     * 默认值来自 [QoderMachine]：照官方 CLI 的 `randomUUID → sha256` 回退链路复刻，
+     * 服务端看到的就是「没有 umid 的桌面端」，不是凭空编的哈希。
+     * 这里额外允许回填**抓包得到的真实指纹**（有真货时优先级更高）。
+     */
+    private fun promptQoderFingerprint(uid: String) {
+        val cur = QoderAuthStore.fingerprint(this, uid)
+        val derived = QoderMachine.machineId(this)
+        fun field(hint: String, value: String) = EditText(this).apply {
+            this.hint = hint
+            setText(value)
+            isSingleLine = true
+            textSize = FS_CARD_TITLE.toFloat()
+            setTextColor(color("on_surface"))
+            setHintTextColor(color("on_surface_variant"))
+            background = shape("surface_container", RADIUS_CONTROL)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        val idField = field("cosy-machineid", cur?.machineId.orEmpty())
+        val tkField = field("cosy-machinetoken", cur?.machineToken.orEmpty())
+        val tyField = field("cosy-machinetype（默认空）", cur?.machineType.orEmpty())
+        val panel = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(caption("默认使用本机派生身份（与官方无 umid 客户端一致）"))
+            addView(caption("当前：${derived.take(24)}…"), top(2))
+            addView(caption("有抓包真货可填下面三项覆盖"), top(10))
+            addView(idField, top(8))
+            addView(tkField, top(8))
+            addView(tyField, top(8))
+            if (cur != null) {
+                addView(linkAction("清除抓包指纹，回到本机派生") {
+                    QoderAuthStore.clearFingerprint(this@MainActivity, uid)
+                    toast("已清除，改回本机派生身份")
+                    render(currentPage)
+                }, top(12))
+            }
+        }
+        confirmDialog(title = "Qoder 设备身份", message = "", okText = "保存", content = panel) {
+            val id = idField.text?.toString()?.trim().orEmpty()
+            val tk = tkField.text?.toString()?.trim().orEmpty()
+            if (id.isBlank() || tk.isBlank()) {
+                toast("两项都留空 = 用本机派生；要覆盖就两项都填")
+                return@confirmDialog
+            }
+            val ty = tyField.text?.toString()?.trim().orEmpty()
+            QoderAuthStore.setFingerprint(this, uid, QoderAuthStore.QFingerprint(id, tk, ty))
+            toast("已保存抓包指纹")
+            render(currentPage)
         }
     }
 

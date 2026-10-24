@@ -87,6 +87,65 @@ object QoderAuthStore {
         val chatReady: Boolean get() = uid.isNotBlank() && jobToken.isNotBlank()
     }
 
+    /**
+     * 官方客户端抓包得到的**真实**设备指纹。
+     *
+     * 为什么需要它：Qoder 国际版每日领取（campaigns）只下发给带真实 `cosy-machinetoken`
+     * 的请求，而该 token 由阿里 umid 原生 SDK 签发、服务端**校验签发来源** —— 自己哈希
+     * 派生一个塞进去无效（社区单变量对照实验：自造指纹 → no_campaign；官方指纹 → 正常下发）。
+     * 所以这里只能存"抓来的真货"，不自己造。
+     */
+    data class QFingerprint(
+        val machineId: String,
+        val machineToken: String,
+        val machineType: String = "5",
+        val machineOS: String = "aarch64_darwin",
+        val hostname: String = "localhost",
+        val clientType: String = "10",
+        val version: String = "1.1.69",
+    )
+
+    fun fingerprint(context: Context, uid: String): QFingerprint? {
+        val raw = prefs(context).getString(fpKey(uid), null) ?: return null
+        val plain = decrypt(raw) ?: return null
+        return decodeFingerprint(plain)
+    }
+
+    fun setFingerprint(context: Context, uid: String, fp: QFingerprint) {
+        prefs(context).edit().putString(fpKey(uid), encrypt(encodeFingerprint(fp))).apply()
+    }
+
+    fun clearFingerprint(context: Context, uid: String) {
+        prefs(context).edit().remove(fpKey(uid)).apply()
+    }
+
+    internal fun encodeFingerprint(fp: QFingerprint): String = JSONObject().apply {
+        put("id", fp.machineId)
+        put("tk", fp.machineToken)
+        put("ty", fp.machineType)
+        put("os", fp.machineOS)
+        put("hn", fp.hostname)
+        put("ct", fp.clientType)
+        put("ver", fp.version)
+    }.toString()
+
+    internal fun decodeFingerprint(plain: String): QFingerprint? = runCatching {
+        val o = JSONObject(plain)
+        val id = o.optString("id").trim()
+        val tk = o.optString("tk").trim()
+        if (id.isBlank() || tk.isBlank()) null else QFingerprint(
+            machineId = id,
+            machineToken = tk,
+            machineType = o.optString("ty", "5").ifBlank { "5" },
+            machineOS = o.optString("os", "aarch64_darwin").ifBlank { "aarch64_darwin" },
+            hostname = o.optString("hn", "localhost").ifBlank { "localhost" },
+            clientType = o.optString("ct", "10").ifBlank { "10" },
+            version = o.optString("ver", "1.1.69").ifBlank { "1.1.69" },
+        )
+    }.getOrNull()
+
+    private fun fpKey(uid: String) = "q_acc_${uid}_fp"
+
     fun list(context: Context): List<QMeta> = readIndex(context)
 
     fun activeUid(context: Context): String? {
@@ -329,6 +388,11 @@ object QoderAuthStore {
 
     /** 纯计算自检：索引 JSON 往返无损（uid 是主键），**含 COSY 聊天所需的组织字段**。 */
     fun selfCheck() {
+        // 指纹编解码往返：抓来的 token 很长且含 base64url 字符，拼错一个字符就等于换设备
+        val fp = QFingerprint("mid-123", "mtok_abc-DEF_456", "5", "aarch64_darwin", "localhost")
+        val back = decodeFingerprint(encodeFingerprint(fp))
+        check(back == fp) { "自检失败：设备指纹编解码不往返" }
+        check(decodeFingerprint("""{"id":"","tk":""}""") == null) { "自检失败：空指纹应为 null" }
         val src = listOf(
             QMeta("q-1", "张三", "a@b.com", QoderAuthApi.MODE_CN, 1791341100000L),
             QMeta(

@@ -8,6 +8,21 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.0] - 2026-10-17
+
+### Added
+- **Qoder 桌面端机器身份**（`QoderMachine`）：按官方 CLI（`@qoder-ai/qodercli` 1.1.78）
+  的真实回退链路复刻 —— `seed = randomUUID → Cosy-MachineId = sha256(seed)`，
+  且 umid 不可用时官方**自己**就把 `Cosy-MachineToken` 设成 `machineId`、`MachineType` 留空。
+  我们照抄这一条，服务端看到的是「没有 umid 的桌面端」，不是自造哈希。
+  - 国际版 campaigns/claim 请求现在带完整 cosy-machine* 头（Version 1.1.78 / ClientType 5 /
+    MachineOS aarch64_darwin / MachineId / MachineToken）。
+  - 国内版仍然**不带**机器头（对照实验：国内带指纹反而 no_campaign）。
+- Qoder 账号卡新增「设备身份」入口：默认本机派生；可从桌面端抓包回填真实指纹覆盖。
+
+### Changed
+- 国际版无活动时的提示区分两种原因（本机身份未被接受 / 抓包指纹过期）。
+
 ## [0.6.3] - 2026-10-17
 
 ### Fixed
