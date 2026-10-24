@@ -338,8 +338,8 @@ object CopilotApi {
         check(!pendingLike("expired_token")) { "自检失败：expired_token 是失败" }
         check(!pendingLike("")) { "自检失败：空错误码不是等待" }
         // 退避步长：+5 秒，且要有个上限免得等到授权过期
-        check(nextInterval(5000) == 10_000) { "自检失败：slow_down 后间隔应 +5s" }
-        check(nextInterval(60_000) == 60_000) { "自检失败：退避要有上限" }
+        check(nextInterval(5_000L) == 10_000L) { "自检失败：slow_down 后间隔应 +5s" }
+        check(nextInterval(60_000L) == 60_000L) { "自检失败：退避要有上限" }
     }
 
     /** 自检辅助：这两类错误码都表示"继续等"，都不该终止登录。 */
