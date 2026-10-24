@@ -1,0 +1,72 @@
+name: Probe GitHub Models
+
+# 用途：手机端到 models.github.ai 的请求被中间设备拦成 "OK"（连 POST 都只回 OK），
+# 所以借 Actions runner 的公网能力，把 GitHub Models 的模型目录探出来。
+# 结果写到 job summary + 上传 artifact，手机端直接下载 JSON。
+on:
+  workflow_dispatch:
+    inputs:
+      run_inference:
+        description: "顺带用 GITHUB_TOKEN 打一次推理，验证能不能真用"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  models: read          # GitHub Models 的目录/推理权限
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Catalog (models.github.ai/catalog/models)
+        run: |
+          set -x
+          code=$(curl -sS -o catalog.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/json" \
+            https://models.github.ai/catalog/models || echo ERR)
+          echo "http=$code bytes=$(wc -c < catalog.json || echo 0)"
+          head -c 300 catalog.json || true
+          echo
+
+      - name: Inference smoke test
+        if: ${{ inputs.run_inference }}
+        run: |
+          code=$(curl -sS -o infer.json -w '%{http_code}' -X POST \
+            https://models.github.ai/inference/chat/completions \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"say ok"}],"max_tokens":8}' || echo ERR)
+          echo "http=$code bytes=$(wc -c < infer.json || echo 0)"
+          cat infer.json || true
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## GitHub Models probe"
+            echo '```json'
+            python3 - <<'PY' 2>/dev/null || echo "(catalog.json 不是 JSON)"
+          import json
+          d = json.load(open('catalog.json'))
+          print("count =", len(d) if isinstance(d, list) else d)
+          for m in (d if isinstance(d, list) else [])[:200]:
+              print(m.get("id"), "|", m.get("publisher"), "|", m.get("rate_limit_tier", ""))
+          PY
+            echo '```'
+            echo "### inference"
+            echo '```'
+            head -c 800 infer.json 2>/dev/null || echo "(no inference)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: github-models-probe
+          path: |
+            catalog.json
+            infer.json
+          if-no-files-found: warn
+          retention-days: 7
