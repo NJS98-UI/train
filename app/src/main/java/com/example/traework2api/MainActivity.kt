@@ -1542,18 +1542,10 @@ class MainActivity : Activity() {
         // 刷新按钮 + 计数。计数是"刷新真的起作用了"的证据 —— 否则点了没新增时用户会以为没生效。
         val countView = caption("")
         fun refreshCountLabel() {
+            // 只报**当前所选平台真实能用的条数**：以前会额外写"（Trae 12 + Qoder 15，按模型路由）"
+            // 这种括号说明，数字和平台对不上时反而更迷惑。
             val n = GatewayBackend.modelsFor(this@MainActivity).length()
-            countView.text = when {
-                GatewayBackend.isMixed(this@MainActivity) ->
-                    "已加载 · $n 个模型（Trae ${ModelsRepo.current().length()} + Qoder " +
-                        "${QoderModelCatalog.current().size}，按模型路由）"
-                GatewayBackend.hasQoderAccount(this@MainActivity) -> {
-                    val free = QoderModelCatalog.freeCount()
-                    val src = if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单"
-                    "已加载 · $n 个模型（$src · $free 个免费）"
-                }
-                else -> "已加载 · $n 个模型"
-            }
+            countView.text = "已加载 · $n 个模型"
         }
         val refreshBtn = action(REFRESH_MODELS_LABEL) { refreshModels() }
         // 刷新中：按钮置灰 + 文案变「刷新中…」（照抄记录页/积分刷新那套，别新造轮子）
@@ -1569,30 +1561,10 @@ class MainActivity : Activity() {
         }
         addView(toolbar)
 
-        // Qoder 后端：官方目录的来源说明 + 导入/诊断入口。
-        // 为什么单独一张卡：官方 UI 的名字 ≠ 请求用的 key，倍率也只有官方目录才准；
-        // 用户遇到"对不上"时必须有个地方能导入真目录、能看见上游到底回了什么。
-        // 只在**拉取失败**时露出一条排查入口：正常能拉到就什么都不显示（用户明确要求别摆多余的东西）
-        if (!QoderModelCatalog.hasDynamic() && QoderAuthApi.lastCatalogError != null) {
-            addView(card(tone = CardTone.SOFT) {
-                addView(caption("自动拉取官方目录失败，当前用内置 ${QoderModelCatalog.BUILTIN.size} 个模型。"))
-                addView(linkAction("查看失败原因") { showLastCatalogRaw() }, top(6))
-                addView(linkAction("手动导入 catalog-v7（兜底）") { promptImportCatalog() }, top(6))
-            }, top(GAP))
-        }
-
         // 未加载：整页只有一张说明卡 + 刷新按钮（用户要的"空状态"，见 CHANGELOG 0.4.3）
+        // 空状态只留标题 + 一个刷新按钮：列表区不摆任何"怎么添加/怎么导入"的提示
         val notLoaded = card {
             addView(text("模型目录尚未加载", FS_CARD_TITLE, true))
-            addView(caption(
-                if (GatewayBackend.hasQoderAccount(this@MainActivity)) {
-                    "点「$REFRESH_MODELS_LABEL」从 Qoder 官方拉目录（含每个模型的倍率，" +
-                        "以及内置清单里没有的免费模型）。拉不到会继续用内置 " +
-                        "${QoderModelCatalog.BUILTIN.size} 个。"
-                } else {
-                    "连接账号后点击「$REFRESH_MODELS_LABEL」，将从上游加载真实可用模型。"
-                }
-            ), top(8))
             addView(action(REFRESH_MODELS_LABEL, full = true) { refreshModels() }, top(12))
         }
         addView(notLoaded)

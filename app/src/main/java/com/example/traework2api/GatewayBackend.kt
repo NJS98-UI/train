@@ -161,11 +161,14 @@ object GatewayBackend {
         return out
     }
 
-    /** 模型页的"是否已加载"判定。 */
-    fun modelsLoaded(ctx: Context): Boolean = when {
-        hasQoderAccount(ctx) -> true
-        else -> ModelsRepo.isDynamic
-    }
+    /**
+     * 模型页的"是否已加载"判定 —— **跟着当前选择的后端走**。
+     *
+     * 之前只要登过 Qoder 就恒为 true，于是强制 Trae 且 Trae 还没拉过表时，
+     * 页面会显示"已加载 · 0 个模型"（明明什么都没有，却说加载完了）。
+     * 现在只认一个事实：这张表里到底有没有模型。
+     */
+    fun modelsLoaded(ctx: Context): Boolean = modelsFor(ctx).length() > 0
 
     fun label(backend: String): String = when (backend) {
         QODER -> "Qoder"
