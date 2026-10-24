@@ -169,6 +169,8 @@ class MainActivity : Activity() {
     private var creditTotalTrae: TextView? = null
     private var creditTotalQoder: TextView? = null
     private var creditUpdated: TextView? = null
+    /** Qoder 当前账号的积分大字（监测器原地刷新它）。 */
+    private var qoderCreditView: TextView? = null
     /**
      * 「积分与用量」卡里那几个会被刷新改掉的控件 —— 刷新时**原地改文字**，不重建页面。
      *
