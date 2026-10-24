@@ -251,7 +251,8 @@ object QoderCheckin {
 
     /** 结果状态 → 人话（账号页每行用）。 */
     fun statusLabel(r: PerAccount): String = when (r.status) {
-        "ok" -> "✓ 领取成功 +${r.amount}"
+        // amount=0 表示领到的是查看类活动（不发 Credits），别写成 "+0" 骗人
+        "ok" -> if (r.amount > 0L) "✓ 领取成功 +${r.amount}" else "✓ 已领取${if (r.message.isBlank()) "" else "（${r.message}）"}"
         "already" -> r.message.ifBlank { "今日已领取" }
         "unsupported" -> "该区域/活动暂不可领（见消息）"
         else -> "失败：${r.message}"

@@ -389,10 +389,18 @@ object QoderAuthApi {
         val benefitKind: String,   // CREDITS | ...
         val benefitAmount: Long,
     ) {
+        /** 有额度就记额度（VIEW_DETAILS 的 benefit 是 null → 0）。 */
+        val grantsCredits: Boolean get() = benefitAmount > 0L
+
+        /**
+         * 只要服务端说 CLAIMABLE 就去领 —— **不再只认 CLAIM_BENEFIT**。
+         *
+         * 实测（2026-10-25，号 A）：桌面端对 `VIEW_DETAILS` 横幅也显示「领取」按钮，
+         * 点了就变 CLAIMED；我们以前把这类过滤掉，用户看到的就是「电脑能领、App 不能领」。
+         * 领它不发积分，但状态要和桌面端一致，否则永远对不上。
+         */
         val claimable: Boolean
-            get() = id.isNotBlank() &&
-                claimStatus.equals("CLAIMABLE", true) &&
-                actionType.equals("CLAIM_BENEFIT", true)
+            get() = id.isNotBlank() && claimStatus.equals("CLAIMABLE", true)
     }
 
     /** 领取结果。status ∈ ok / already / fail（国际与国内同一套判定，不再区分 unsupported）。 */
@@ -534,23 +542,16 @@ object QoderAuthApi {
         }
         val claimable = campaigns.filter { it.claimable }
         if (claimable.isEmpty()) {
-            // 国际版没有「每天领」活动是**平台硬限制**，不是我们没做对：
-            // 该活动只下发给带原生设备标识（Cosy-MachineToken，阿里 umid 原生 SDK 产出、
-            // 仅 Qoder 桌面端/CLI 能生成）的请求；手机端伪造不出来，服务端会 200 但把活动隐藏。
-            // 所以这里必须如实说清楚，不能写成"可能已领" —— 那会让人以为明天再来就有了。
-            // 实测（2026-10-24，两个真实国际版账号）：活动全是 VIEW_DETAILS 营销横幅，
-            // benefit 为 null，领了只写一条 CLAIMED 记录、额度不动。文案必须把
-            // "已领取" 和 "领到了积分" 分开说，否则用户会以为签到坏了。
+            // 实测（2026-10-25）：活动列表随日期滚动，「每天领 100 Credits」是
+            // CLAIM_BENEFIT + 每日 10:00(UTC+8) 重置。列表是动态的 —— 凌晨查可能一条
+            // CLAIM_BENEFIT 都没有，到点后才出现，所以调用方必须重试（见 AutoCheckin）。
             val allClaimed = campaigns.isNotEmpty() &&
                 campaigns.all { it.claimStatus.equals("CLAIMED", true) }
-            val why = if (allClaimed) {
-                "已领取 ${campaigns.size} 条活动（均为查看类，不发 Credits）"
-            } else if (campaigns.isNotEmpty()) {
-                "有 ${campaigns.size} 条活动但都是查看类（不发 Credits），本账号暂无每日领取"
-            } else if (cred.mode == MODE_GLOBAL) {
-                "国际版无可见活动（已带 Cosy-ClientType:10），该账号可能没有活动资格"
-            } else {
-                "今日无可领活动（可能已领或未到 10:00 领取窗口）"
+            val why = when {
+                allClaimed -> "已领取 ${campaigns.size} 条"
+                campaigns.isNotEmpty() -> "无待领活动（${campaigns.size} 条均已处理）"
+                cred.mode == MODE_GLOBAL -> "无可见活动"
+                else -> "今日无可领活动"
             }
             return QClaimResult("already", 0, why)
         }
@@ -565,8 +566,11 @@ object QoderAuthApi {
                 lastErr = e.message ?: e.javaClass.simpleName
             }
         }
-        return if (fresh > 0) QClaimResult("ok", total, "")
-        else QClaimResult("already", 0, lastErr?.let { "领取未生效：$it" } ?: "今日已领取")
+        return when {
+            fresh > 0 && total > 0L -> QClaimResult("ok", total, "")
+            fresh > 0 -> QClaimResult("ok", 0, "领取 $fresh 条（无 Credits）")
+            else -> QClaimResult("already", 0, lastErr?.let { "领取未生效：$it" } ?: "今日已领取")
+        }
     }
 
     /**
@@ -603,7 +607,7 @@ object QoderAuthApi {
             "自检失败：Qoder campaigns 端点路径不符"
         }
 
-        // 活动解析：只有 CLAIMABLE ∧ CLAIM_BENEFIT 才算可领（判松了会白发 claim，判严了漏领）。
+        // 活动解析：只要 CLAIMABLE 就算可领（判严了会漏领 —— 桌面端 VIEW_DETAILS 也能领）。
         // 注意 parseCampaigns 会**丢弃空 id** 的条目，故 4 条输入 → 3 条有效解析（顺序：act-1, act-2, act-4）。
         val camps = parseCampaigns(JSONObject("""{"campaigns":[
             {"campaignId":"act-1","claimStatus":"CLAIMABLE","actionType":"CLAIM_BENEFIT","benefit":{"kind":"CREDITS","amount":100}},
@@ -614,7 +618,8 @@ object QoderAuthApi {
         check(camps.size == 3) { "自检失败：空 id 应被丢弃，4 条输入应解析出 3 条" }
         check(camps[0].id == "act-1" && camps[0].claimable) { "自检失败：CLAIMABLE+CLAIM_BENEFIT 应判可领" }
         check(camps[1].id == "act-2" && !camps[1].claimable) { "自检失败：已领(CLAIMED)不应判可领" }
-        check(camps[2].id == "act-4" && !camps[2].claimable) { "自检失败：非 CLAIM_BENEFIT 不应判可领" }
+        check(camps[2].id == "act-4" && camps[2].claimable) { "自检失败：CLAIMABLE 的非 CLAIM_BENEFIT 也该领" }
+        check(camps[0].grantsCredits) { "自检失败：带 benefit 的应记额度" }
 
         // claim 解析：replayed=true（今天已领过）不算新领、不计额度，避免重复计数。
         check(parseClaim(JSONObject("""{"status":"CLAIMED","replayed":false,"benefit":{"kind":"CREDITS","amount":100}}""")) == (true to 100L)) {

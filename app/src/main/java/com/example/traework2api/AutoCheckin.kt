@@ -33,7 +33,7 @@ object AutoCheckin {
      * 活动是到点才开（例：每天 10:00 开放当日领取）。如果 9:50 打开 App 就把"今天已跑过"
      * 记下来，10:00 之后开多少次都不会再领 —— 用户看到的就是"时间到了 App 也不会领"。
      */
-    private const val RETRY_COOLDOWN_MS = 30 * 60 * 1000L
+    private const val RETRY_COOLDOWN_MS = 10 * 60 * 1000L
 
     /** 领取窗口：**新加坡时间 10:00 开窗**，10:05 触发（留 5 分钟余量）。 */
     const val ACTION_ALARM = "com.example.traework2api.AUTO_CHECKIN"
