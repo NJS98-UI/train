@@ -159,8 +159,7 @@ class MainActivity : Activity() {
     private var qoderRemaining: Double? = null
     /** Qoder 每日 Credits 领取进行中（手动，挡住重复点击）。 */
     private var qoderClaimBusy = false
-    /** 本次进程是否已尝试过启动补签（真正的"每天一次"由 AutoCheckin 落盘判定）。 */
-    private var autoCheckinTried = false
+
     /** 「积分与用量」/「Qoder 账号」卡里会被监测器原地刷新的控件。 */
     private var monitorApply: (() -> Unit)? = null
 
@@ -657,7 +656,6 @@ class MainActivity : Activity() {
                 addView(action("Qoder", outlined = sel != GatewayBackend.QODER) { pick(GatewayBackend.QODER) }, weighted(start = 8))
                 addView(action("自动", outlined = sel != GatewayBackend.AUTO) { pick(GatewayBackend.AUTO) }, weighted(start = 8))
             })
-            addView(caption(GatewayBackend.describe(this@MainActivity)), top(8))
         }
 
         // ---- 积分检测（无说明）----
@@ -895,10 +893,7 @@ class MainActivity : Activity() {
         val tyField = field("cosy-machinetype（默认空）", cur?.machineType.orEmpty())
         val panel = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
-            addView(caption("默认使用本机派生身份（与官方无 umid 客户端一致）"))
-            addView(caption("当前：${derived.take(24)}…"), top(2))
-            addView(caption("有抓包真货可填下面三项覆盖"), top(10))
-            addView(idField, top(8))
+            addView(idField, top(0))
             addView(tkField, top(8))
             addView(tyField, top(8))
             if (cur != null) {
@@ -977,15 +972,16 @@ class MainActivity : Activity() {
         if (!any) toast("没有可签到的账号")
     }
 
-    /** 一键签到卡下面的状态文字（两个平台各一句，没数据就不编）。 */
+    /** 一键签到卡下面的状态文字：只报结果，不写解释。 */
     private fun checkinStatusText(): String {
         val parts = ArrayList<String>()
         accountCheckin?.let {
-            parts.add("Trae：" + if (it.checkedIn) "今日已签到" else if (!it.enable) "未开放" else "可签到")
+            parts.add("Trae：" + if (it.checkedIn) "已签到" else if (!it.enable) "未开放" else "可签到")
         }
         val last = QoderCheckin.lastResults(this)
         if (last != null) {
-            parts.add("Qoder " + last.date + "：" + last.results.joinToString("；") { QoderCheckin.statusLabel(it) })
+            val ok = last.results.count { it.ok }
+            parts.add("Qoder：" + if (ok > 0) "领取 $ok 个" else "无可领")
         }
         return parts.joinToString("  ·  ")
     }
@@ -2447,10 +2443,9 @@ class MainActivity : Activity() {
         CreditMonitor.listener = CreditMonitor.Listener { s -> applyMonitorSnapshot(s) }
         // 进页面先回填上一次快照，避免要等最多 2 秒才出数。
         CreditMonitor.currentSnapshot()?.let { applyMonitorSnapshot(it) }
-        // 启动补签：**全部平台、全部账号**，当天没签的都补上（每天只跑一次）。
-        // 定时签到靠 AlarmManager，进程被杀/手机重启后闹钟不会自己回来，所以进 App 必须兜一次。
-        if (!autoCheckinTried) {
-            autoCheckinTried = true
+        // 补签：全部平台、全部账号。**没领到会重试**（30 分钟冷却），
+        // 所以 10:00 开窗后再打开 App 也能领 —— 不再是"一天只试一次"。
+        if (AutoCheckin.shouldAttempt(this)) {
             thread(name = "auto-checkin") {
                 val summary = runCatching { AutoCheckin.runAllOnce(this) }.getOrNull()
                 if (summary != null) runOnUiThread {
@@ -2462,6 +2457,8 @@ class MainActivity : Activity() {
                 }
             }
         }
+        // 开窗闹钟：到点自动领，不依赖用户开 App
+        AutoCheckin.scheduleWindowAlarm(this)
     }
 
     override fun onPause() {

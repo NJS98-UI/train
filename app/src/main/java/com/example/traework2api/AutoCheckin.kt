@@ -1,7 +1,12 @@
 package com.example.traework2api
 
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.TimeZone
 import java.util.Date
 import java.util.Locale
 
@@ -20,17 +25,74 @@ object AutoCheckin {
 
     private const val PREFS = "traework2api_prefs"
     private const val KEY_DATE = "auto_checkin_date"
+    private const val KEY_LAST_TRY = "auto_checkin_last_try"
+
+    /**
+     * 重试冷却：没领到就别一直打上游，但**不能一天只试一次**。
+     *
+     * 活动是到点才开（例：每天 10:00 开放当日领取）。如果 9:50 打开 App 就把"今天已跑过"
+     * 记下来，10:00 之后开多少次都不会再领 —— 用户看到的就是"时间到了 App 也不会领"。
+     */
+    private const val RETRY_COOLDOWN_MS = 30 * 60 * 1000L
+
+    /** 领取窗口：**新加坡时间 10:00 开窗**，10:05 触发（留 5 分钟余量）。 */
+    const val ACTION_ALARM = "com.example.traework2api.AUTO_CHECKIN"
+    private const val REQ_AUTO = 8801
+    private const val WINDOW_HOUR = 10
+    private const val WINDOW_MINUTE = 5
+
+    /** 下一次开窗时刻（毫秒）。今天已过就顺延到明天。 */
+    fun nextWindowAt(now: Long = System.currentTimeMillis()): Long {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Singapore"))
+        cal.timeInMillis = now
+        cal.set(Calendar.HOUR_OF_DAY, WINDOW_HOUR)
+        cal.set(Calendar.MINUTE, WINDOW_MINUTE)
+        cal.set(Calendar.SECOND, 0)
+        cal.set(Calendar.MILLISECOND, 0)
+        if (cal.timeInMillis <= now) cal.add(Calendar.DAY_OF_YEAR, 1)
+        return cal.timeInMillis
+    }
+
+    /**
+     * 挂"开窗闹钟"：到点自动领一次，不依赖用户开 App。
+     *
+     * 用 `setAndAllowWhileIdle`（不是 exact）：精确闹钟在 Android 12+ 要单独申请权限，
+     * 而领取窗口本身有十几分钟余量，差几分钟无所谓。
+     */
+    fun scheduleWindowAlarm(ctx: Context) {
+        val am = ctx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        val pi = PendingIntent.getBroadcast(
+            ctx, REQ_AUTO,
+            Intent(ctx, AutoCheckinReceiver::class.java).setAction(ACTION_ALARM),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        runCatching { am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, nextWindowAt(), pi) }
+            .onFailure { android.util.Log.w(TAG, "开窗闹钟挂不上: ${it.javaClass.simpleName}") }
+    }
     private const val TAG = "AutoCheckin"
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     fun today(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
 
-    /** 今天是否已经补签过（补签成功与否都算跑过，避免反复重试打上游）。 */
+    /** 今天是否已经**收工**（领到了，或确认没有可领的）。 */
     fun alreadyRanToday(ctx: Context): Boolean = prefs(ctx).getString(KEY_DATE, null) == today()
 
-    private fun markRan(ctx: Context) {
+    private fun markDone(ctx: Context) {
         prefs(ctx).edit().putString(KEY_DATE, today()).apply()
+    }
+
+    /**
+     * 现在该不该尝试一轮。
+     *
+     * - 今天已收工 → 不试
+     * - 距上次尝试不到 [RETRY_COOLDOWN_MS] → 不试（防抖）
+     * - 否则 → 试（这就是"到点后再开 App 还能领"的那条路）
+     */
+    fun shouldAttempt(ctx: Context): Boolean {
+        if (alreadyRanToday(ctx)) return false
+        val last = prefs(ctx).getLong(KEY_LAST_TRY, 0L)
+        return System.currentTimeMillis() - last >= RETRY_COOLDOWN_MS
     }
 
     /**
@@ -39,8 +101,11 @@ object AutoCheckin {
      * @return 人类可读摘要（null = 今天已经跑过 / 没有可签的账号）
      */
     fun runAllOnce(ctx: Context): String? {
-        if (alreadyRanToday(ctx)) return null
+        if (!shouldAttempt(ctx)) return null
+        prefs(ctx).edit().putLong(KEY_LAST_TRY, System.currentTimeMillis()).apply()
         val parts = ArrayList<String>()
+        var claimed = false
+        var allSettled = true
 
         // ---- Trae：逐个账号查状态，未签才签 ----
         runCatching {
@@ -50,7 +115,10 @@ object AutoCheckin {
                 val st = TraeUpstream.fetchCheckin(cred.accessToken, m.uid, cred.region) ?: continue
                 if (st.checkedIn || !st.enable) continue
                 val code = TraeUpstream.claimCheckin(cred.accessToken, m.uid, cred.region) ?: continue
-                if (code in 200..299) parts.add("Trae ${m.nickname.ifBlank { m.uid }} 已签到")
+                if (code in 200..299) {
+                    claimed = true
+                    parts.add("Trae ${m.nickname.ifBlank { m.uid }} 已签到")
+                }
             }
         }.onFailure { android.util.Log.w(TAG, "Trae 补签失败: ${it.javaClass.simpleName}: ${it.message}") }
 
@@ -58,11 +126,15 @@ object AutoCheckin {
         runCatching {
             if (QoderAuthStore.list(ctx).isNotEmpty()) {
                 val r = QoderCheckin.runAll(ctx)
+                if (r.results.any { it.ok }) claimed = true
+                // 全失败（网络/令牌）说明还没跑成，别封盘，等下一轮重试
+                if (r.results.any { !it.ok && it.status != "already" }) allSettled = false
                 parts.add("Qoder " + r.results.joinToString("；") { QoderCheckin.statusLabel(it) })
             }
         }.onFailure { android.util.Log.w(TAG, "Qoder 补签失败: ${it.javaClass.simpleName}: ${it.message}") }
 
-        markRan(ctx)
+        // 领到了、或确实没有可领的 → 今天收工；否则留着下次再试（活动可能到点才开）
+        if (claimed || allSettled) markDone(ctx)
         if (parts.isEmpty()) return null
         val summary = parts.joinToString(" · ")
         android.util.Log.i(TAG, "启动补签: $summary")
@@ -72,7 +144,14 @@ object AutoCheckin {
     fun selfCheck() {
         // 日期键必须随日期变化：写死会让"每天一次"退化成"永远只跑一次"
         check(today().matches(Regex("^\\d{4}-\\d{2}-\\d{2}$"))) { "自检失败：日期格式不对" }
-        // 摘要为空时不该标记"有结果"（调用方靠 null 判断要不要提示）
-        check(listOf<String>().takeIf { it.isNotEmpty() } == null) { "自检失败：空摘要应为 null" }
+        // 冷却必须是正数：写成 0 就等于每次前台都打一遍上游
+        check(RETRY_COOLDOWN_MS >= 60_000L) { "自检失败：重试冷却过短" }
+        // 窗口必须落在 10:00 之后几分钟：算成 9:55 就等于永远抢不到当天活动
+        val t = nextWindowAt(0L)
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Singapore")).apply { timeInMillis = t }
+        check(cal.get(Calendar.HOUR_OF_DAY) == WINDOW_HOUR) { "自检失败：开窗小时不对" }
+        check(nextWindowAt(System.currentTimeMillis()) > System.currentTimeMillis()) {
+            "自检失败：下一次开窗必须在未来"
+        }
     }
 }

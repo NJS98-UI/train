@@ -53,6 +53,10 @@
         <receiver
             android:name=".QoderCheckinReceiver"
             android:exported="false" />
+        <!-- 开窗补签闹钟（新加坡 10:05）：到点自动领，不依赖用户开 App。 -->
+        <receiver
+            android:name=".AutoCheckinReceiver"
+            android:exported="false" />
         <service
             android:name=".GatewayService"
             android:exported="false"
