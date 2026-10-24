@@ -578,8 +578,10 @@ object QoderAuthApi {
     private fun claimDailyForCred(context: Context, cred: QoderAuthStore.QCred): QClaimResult {
         // 国际/国内同走干净链路（不带 Cosy-Machine* 头）。桌面端专属「每天领 100 Credits」
         // 活动在没有原生指纹时服务端会正常缺席，但其它通用活动仍可领；无需再对国际版硬挡 unsupported。
-        var jt = validJobTokenFor(context, cred, skewMillis = 60_000L)
-        if (jt.isNullOrBlank()) return QClaimResult("fail", 0, "没有有效 token，请重新粘贴 PAT 登录")
+        val fresh = validJobTokenFor(context, cred, skewMillis = 60_000L)
+        if (fresh.isNullOrBlank()) return QClaimResult("fail", 0, "没有有效 token，请重新粘贴 PAT 登录")
+        // 可变的非空副本：401 时要能就地换掉（Kotlin 对 var 的智能转换不成立，故先落地成 String）
+        var jt: String = fresh
         // 国际版：带机器身份（有抓包真货用真货，否则用官方无-umid 的等价身份）。
         // 国内版刻意不带 —— 对照实验里国内带指纹反而 no_campaign。
         val identity = if (cred.mode == MODE_GLOBAL) {
