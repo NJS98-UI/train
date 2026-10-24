@@ -62,6 +62,17 @@ object QoderAuthApi {
     var lastCatalogRaw: String? = null
         private set
 
+    /**
+     * 记录一次目录请求的结果（供 [QoderUpstream] 的签名接口复用同一套诊断）。
+     *
+     * @param raw   响应原文；null = 连响应都没有（传输异常）
+     * @param error 失败原因；null = 成功
+     */
+    fun noteCatalogAttempt(raw: String?, error: String?) {
+        if (raw != null) lastCatalogRaw = raw
+        if (error != null) lastCatalogError = error
+    }
+
     private const val JSON = "application/json"
 
     private val client = OkHttpClient.Builder()

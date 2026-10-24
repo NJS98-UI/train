@@ -4,7 +4,7 @@
 > 纯原生 Android 实现（Kotlin），**无需 Python、无需 Docker、无需电脑**——装到手机上就能跑。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/version-0.4.16-green.svg)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/version-0.4.17-green.svg)](CHANGELOG.md)
 
 ---
 
@@ -51,8 +51,9 @@
   每个账号卡里直接标出它自己的余量，**不需要切到那个账号**才看得到；
   合计只累加查询成功的账号，不完整时显示 `1234（2/3 个账号）` 而不是假装总数
 - **模型表**：Trae 从上游拉真实模型清单并本地持久化（重启不丢）；Qoder 从官方拉目录
-  （**含每个模型的官方倍率**，0 倍率标「免费」）；拉不到可导入 Qoder CLI 的
-  `catalog-v7` 缓存（App 内自动解密）拿到**准确 key + 倍率**，最后才退回内置清单兜底
+  （**含每个模型的官方倍率**，0 倍率标「免费」）。数据源三级降级、**全程自动**：
+  ① COSY 签名的 `/algo/api/v2/model/list`（与桌面版模型选择器同源，"此刻"最准）
+  ② openapi 的 `/api/v1/models` ③ 内置 20 条（key 取自官方目录快照，不再靠猜）
 - **保活**：前台服务 + 常驻通知 + 唤醒锁 + 看门狗闹钟 + 划掉任务自动拉回；有保活体检面板
 - **省心**：打开 App 自动启动服务（手动停止过则尊重你的选择）；改了亮暗主题与多配色风格
 - **局域网可用**：服务监听 `0.0.0.0`，同一 WiFi 下的其它设备也能连（概览页直接给出该填的地址）

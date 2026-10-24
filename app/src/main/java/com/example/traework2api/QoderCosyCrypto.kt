@@ -41,6 +41,15 @@ object QoderCosyCrypto {
     /** 固定查询串。 */
     const val NATIVE_INFER_QUERY = "?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 
+    /**
+     * 官方**模型目录**接口（动态、与桌面版模型选择器同源）。
+     *
+     * 同样是 COSY 签名，但 body 为空（GET），签名路径里 **不含** `/algo` 前缀
+     * （`computeSigPath` 会把开头的 `/algo` 剥掉，见参考实现 cosy.go）。
+     */
+    const val NATIVE_MODEL_LIST_PATH = "/algo/api/v2/model/list"
+    const val MODEL_LIST_SIGNED_PATH = "/api/v2/model/list"
+
     /** COSY 协议版本（同时用于 `Cosy-Version` 头与 payload 的 `cosyVersion`）。 */
     const val COSY_VERSION = "1.1.74"
 
@@ -135,9 +144,15 @@ object QoderCosyCrypto {
      * @param unixSeconds 当前 unix 秒（字符串，**不要**补零/格式化）
      * @param encodedBody [encodeBody] 得到的**密文**转成的字符串（ASCII）
      */
-    fun authorization(payloadB64: String, key: String, unixSeconds: String, encodedBody: String): String {
+    fun authorization(
+        payloadB64: String,
+        key: String,
+        unixSeconds: String,
+        encodedBody: String,
+        signedPath: String = COSY_SIGNED_PATH,
+    ): String {
         val signature = md5Hex(
-            payloadB64 + "\n" + key + "\n" + unixSeconds + "\n" + encodedBody + "\n" + COSY_SIGNED_PATH,
+            payloadB64 + "\n" + key + "\n" + unixSeconds + "\n" + encodedBody + "\n" + signedPath,
         )
         return "Bearer COSY.$payloadB64.$signature"
     }
@@ -404,6 +419,15 @@ object QoderCosyCrypto {
         val expected = md5Hex("PAYLOAD\nKEY\n1700000000\nBODY\n$COSY_SIGNED_PATH")
         check(sig.endsWith(expected)) { "自检失败：签名公式不对（换行/路径长度），得到 [$sig]" }
         // 末尾多一个换行必须产生不同摘要（这是最容易写错的一处）
+        // 模型目录接口用的是另一条签名路径（/api/v2/model/list，无 /algo 前缀）：
+        // 同一份输入换个路径必须得到不同签名，否则说明路径没进签名 → 上游必 401/400。
+        val listAuth = authorization("PAYLOAD", "KEY", "1700000000", "", MODEL_LIST_SIGNED_PATH)
+        val listExpected = "Bearer COSY.PAYLOAD." +
+            md5Hex("PAYLOAD\nKEY\n1700000000\n\n$MODEL_LIST_SIGNED_PATH")
+        check(listAuth == listExpected) { "自检失败：模型目录签名路径未生效" }
+        check(listAuth != authorization("PAYLOAD", "KEY", "1700000000", "")) {
+            "自检失败：换签名路径必须改变签名"
+        }
         check(md5Hex("PAYLOAD\nKEY\n1700000000\nBODY\n$COSY_SIGNED_PATH\n") != expected) {
             "自检失败：签名末尾换行未生效"
         }

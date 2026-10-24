@@ -377,6 +377,86 @@ object QoderUpstream {
         settle(null, "exhausted")
     }
 
+    // ------------------------------------------------------------------
+    // 官方模型目录（动态拉取，签名版）
+    // ------------------------------------------------------------------
+
+    /**
+     * 用 COSY 签名直接拉官方**模型目录**：`GET {infer}/algo/api/v2/model/list`，空 body。
+     *
+     * 为什么走签名而不是 openapi 的 `/api/v1/models`：参考实现把数据源优先级写得很清楚 ——
+     * **网关动态接口 > 本机客户端缓存 > 冻结快照**。动态接口与桌面版模型选择器同源，
+     * 是唯一"此刻"准确的来源（key、倍率、上下文、是否免费都在里面）。
+     * 走它就不需要用户去导 `catalog-v7`、也不需要用户点同步。
+     *
+     * 签名要点（与聊天请求同一套 COSY 方案，仅三处不同）：
+     *  1. body 为空 → 参与签名的 body 也是空串；
+     *  2. 签名路径是 `/api/v2/model/list`（**不含** `/algo` 前缀）；
+     *  3. 不需要 `X-Model-Key` / `X-Model-Source`（没有具体模型）。
+     *
+     * @return 响应原文；失败返回 null，原因写进 [QoderAuthApi.lastCatalogError]
+     */
+    fun fetchModelListRaw(context: Context, cred: QoderAuthStore.QCred, jobToken: String): String? {
+        val unixSeconds = (System.currentTimeMillis() / 1000).toString()
+        val runtime = try {
+            runtimeFieldsFor(cred, jobToken)
+        } catch (e: Exception) {
+            QoderAuthApi.noteCatalogAttempt(null, "生成签名材料失败: ${e.javaClass.simpleName}")
+            return null
+        }
+        val payloadB64 = QoderCosyCrypto.authorizationPayload(
+            QoderModelCatalog.newRequestId(),
+            runtime.encryptUserInfo,
+        )
+        val authorization = QoderCosyCrypto.authorization(
+            payloadB64, runtime.key, unixSeconds, "",
+            QoderCosyCrypto.MODEL_LIST_SIGNED_PATH,
+        )
+        val machineId = QoderAuthStore.machineId(context)
+        val url = QoderAuthApi.inferBase(cred.mode) + QoderCosyCrypto.NATIVE_MODEL_LIST_PATH
+
+        val b = Request.Builder()
+            .url(url)
+            .get()
+            .header("Accept", "application/json")
+            .header("Authorization", authorization)
+            .header("Cache-Control", "no-cache")
+            .header("Cosy-Business-Product", QoderCosyCrypto.SCENE_BUSINESS_PRODUCT)
+            .header("Cosy-Business-Type", QoderCosyCrypto.SCENE_BUSINESS_TYPE)
+            .header("Cosy-ClientType", QoderCosyCrypto.SCENE_CLIENT_TYPE)
+            .header("Cosy-Data-Policy", if (cred.dataPolicyAgreed) "agree" else "disagree")
+            .header("Cosy-Date", unixSeconds)
+            .header("Cosy-Key", runtime.key)
+            .header("Cosy-MachineId", machineId)
+            .header("Cosy-MachineOS", MACHINE_OS)
+            .header("Cosy-Scene", QoderCosyCrypto.SCENE_SCENE)
+            .header("Cosy-User", cred.uid)
+            .header("Cosy-Version", QoderCosyCrypto.COSY_VERSION)
+            .header("Login-Version", "v2")
+        if (cred.organizationId.isNotEmpty()) b.header("Cosy-Organization-Id", cred.organizationId)
+        if (cred.organizationTags.isNotEmpty()) {
+            b.header("Cosy-Organization-Tags", cred.organizationTags.joinToString(","))
+        }
+
+        return try {
+            client.newCall(b.build()).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    android.util.Log.w(TAG, "模型目录 HTTP ${resp.code}: ${text.take(200)}")
+                    QoderAuthApi.noteCatalogAttempt(text, "签名目录 HTTP ${resp.code}: ${text.take(200)}")
+                    null
+                } else {
+                    QoderAuthApi.noteCatalogAttempt(text, null)
+                    text
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "模型目录传输异常: ${e.javaClass.simpleName}: ${e.message}")
+            QoderAuthApi.noteCatalogAttempt(null, "传输异常: ${e.javaClass.simpleName}")
+            null
+        }
+    }
+
     private fun buildRequest(
         context: Context,
         cred: QoderAuthStore.QCred,

@@ -69,30 +69,29 @@ object QoderModelCatalog {
      * 参考实现自己也没有真实倍率，真实倍率靠 [setDynamic] 从上游目录覆盖）。
      */
     val BUILTIN: List<QModel> = listOf(
-        // ---- 官方 UI 上确认存在、key 也确定的 ----
+        // ---- key 全部来自官方目录快照（catalog-v6 解密导出），不再靠命名规律猜 ----
         QModel("auto", "Auto", 180_000, false, 0.5),
         QModel("ultimate", "极致", 1_000_000, true, 0.8, aliases = listOf("Ultimate")),
         QModel("performance", "快速", 1_000_000, false, null, aliases = listOf("Performance")),
         QModel("efficient", "经济", 180_000, false, null, aliases = listOf("Efficient")),
-        QModel("cmodel", "Cantus", 1_000_000, true, 4.0),
+        QModel("smodel", "Sonus", 180_000, true, 8.0, aliases = listOf("smodel")),
+        QModel("cmodel", "Cantus", 200_000, true, 4.0),
         QModel("qmodel_38max", "Qwen3.8-Max 2", 1_000_000, true, 0.5, aliases = listOf("Qwen3.8-Max")),
+        QModel("qfmodel", "Qwen3.8-Flash", 1_000_000, true, 0.0, aliases = listOf("Qwen3.8-Flash-1M")),
         QModel("kmodel_latest", "Kimi-K3.1-Pro", 1_000_000, false, 1.0, aliases = listOf("Kimi-K3")),
-        QModel("kmodel", "Kimi-K2.8-Preview", 256_000, false, 0.8, aliases = listOf("Kimi-K2.7-Code")),
+        QModel("kmodel", "Kimi-K2.8-Preview", 256_000, true, 0.8, aliases = listOf("Kimi-K2.7-Code")),
         QModel("gmodel", "GLM-5.3", 1_000_000, true, 0.8),
+        QModel("gfmodel", "GLM-5.3-Flash", 1_000_000, true, 0.1),
         QModel("dmodel", "DeepSeek-V4-Pro", 1_000_000, true, 0.5),
         QModel("dfmodel", "DeepSeek-Flash", 1_000_000, true, 0.0, aliases = listOf("DeepSeek-V4-Flash")),
         QModel("mmodel", "MiniMax-M3.1-Flash", 1_000_000, false, 0.1, aliases = listOf("MiniMax-M3")),
 
-        // ---- 官方 UI 上有、但 key 只能按命名规律推断（标记 unverified）----
-        QModel("sonus", "Sonus", 1_000_000, false, 8.0, unverified = true),
-        QModel("qmodel_38flash", "Qwen3.8-Flash", 1_000_000, false, 0.0, unverified = true),
-        QModel("gm53flash", "GLM-5.3-Flash", 1_000_000, false, 0.1, unverified = true),
-
         // ---- 官方 UI 上已看不到、但 key 仍然有效的老模型（留着兼容旧客户端）----
         QModel("lite", "Lite", 180_000, false),
-        QModel("qmodel_latest", "Qwen3.7-Max", 1_000_000, false),
-        QModel("qmodel", "Qwen3.7-Plus", 1_000_000, false),
-        QModel("gm51model", "GLM-5.2", 1_000_000, true),
+        QModel("qmodel_latest", "Qwen3.7-Max", 1_000_000, true, 0.1),
+        QModel("qmodel", "Qwen3.7-Plus", 1_000_000, true, 0.04),
+        QModel("q37fmodel", "Qwen3.7-Flash", 1_000_000, true, 0.1),
+        QModel("gm51model", "GLM-5.2", 1_000_000, true, 0.6),
     )
 
     /** 兼容旧引用名。 */
@@ -417,8 +416,10 @@ object QoderModelCatalog {
 
     fun selfCheck() {
         // ---- 内置清单 ----
-        check(BUILTIN.size == 19) { "自检失败：Qoder 内置模型目录应为 19 条，实际 ${BUILTIN.size}" }
-        check(BUILTIN.map { it.key }.toSet().size == 19) { "自检失败：内置模型 key 有重复" }
+        check(BUILTIN.size == 20) { "自检失败：Qoder 内置模型目录应为 20 条，实际 ${BUILTIN.size}" }
+        check(BUILTIN.map { it.key }.toSet().size == 20) { "自检失败：内置模型 key 有重复" }
+        // key 全部来自官方目录快照，不该再有"推断"的
+        check(BUILTIN.none { it.unverified }) { "自检失败：内置清单不该再有 unverified 的 key" }
         // 官方 APP 清单里两个 0 倍率模型必须在
         check(BUILTIN.count { it.free } == 2) { "自检失败：内置清单应有 2 个免费模型（DeepSeek-Flash / Qwen3.8-Flash）" }
         check(BUILTIN.first().key == DEFAULT_KEY) { "自检失败：默认模型应排在最前" }
@@ -454,13 +455,15 @@ object QoderModelCatalog {
         check(resolve("DeepSeek-V4-Flash").key == "dfmodel") { "自检失败：旧名 DeepSeek-V4-Flash 应解析到 dfmodel" }
         check(resolve("Qwen3.8-Max").key == "qmodel_38max") { "自检失败：旧名 Qwen3.8-Max 应解析到 qmodel_38max" }
         // 官方新名字（Qoder.txt 里抄的）必须能解析
-        check(resolve("Qwen3.8-Flash").key == "qmodel_38flash") { "自检失败：Qwen3.8-Flash 解析失败" }
+        check(resolve("Qwen3.8-Flash").key == "qfmodel") { "自检失败：Qwen3.8-Flash 应解析到 qfmodel" }
         check(resolve("DeepSeek-Flash").key == "dfmodel") { "自检失败：DeepSeek-Flash 解析失败" }
         check(resolve("MiniMax-M3.1-Flash").key == "mmodel") { "自检失败：MiniMax-M3.1-Flash 解析失败" }
         check(resolve("Kimi-K3.1-Pro").key == "kmodel_latest") { "自检失败：Kimi-K3.1-Pro 解析失败" }
-        check(resolve("Sonus").key == "sonus") { "自检失败：Sonus 解析失败" }
-        // 未验证 key 的模型必须带标记，UI 才能提示
-        check(byKey("sonus")?.unverified == true) { "自检失败：Sonus 的 key 是推断的，应标记 unverified" }
+        check(resolve("Sonus").key == "smodel") { "自检失败：Sonus 应解析到 smodel" }
+        check(resolve("Cantus").key == "cmodel") { "自检失败：Cantus 应解析到 cmodel" }
+        check(resolve("GLM-5.3-Flash").key == "gfmodel") { "自检失败：GLM-5.3-Flash 应解析到 gfmodel" }
+        // 官方 key 已确认：不该再有 unverified 标记
+        check(byKey("smodel")?.unverified == false) { "自检失败：Sonus 的 key 已确认，不该标 unverified" }
         check(byKey("gmodel")?.unverified == false) { "自检失败：GLM-5.3 的 key 是确定的，不该标记 unverified" }
 
         // ---- 上游目录解析：CLI 分组格式 ----
@@ -483,8 +486,8 @@ object QoderModelCatalog {
 
         // 合并语义：内置顺序不变、同 key 覆盖、新 key 追加
         val merged = merge(parsed)
-        // 解析出 4 条：auto（内置已有，覆盖）+ free-model/paid/team-only（新增 3）→ 16 + 3
-        check(merged.size == 19 + 3) { "自检失败：合并后应为内置19 + 新3，实际 ${merged.size}" }
+        // 解析出 4 条：auto（内置已有，覆盖）+ free-model/paid/team-only（新增 3）→ 20 + 3
+        check(merged.size == 20 + 3) { "自检失败：合并后应为内置20 + 新3，实际 ${merged.size}" }
         check(merged.first().key == DEFAULT_KEY) { "自检失败：合并后默认模型必须仍在最前" }
         check(merged.first { it.key == "auto" }.priceFactor == 0.0) {
             "自检失败：同 key 应被上游倍率覆盖（auto 0.0）"
@@ -493,10 +496,10 @@ object QoderModelCatalog {
 
         // 应用动态目录后：新模型可解析、倍率生效、免费数正确
         setDynamic(parsed)
-        check(current().size == 22) { "自检失败：动态目录条数不对，实际 ${current().size}" }
+        check(current().size == 23) { "自检失败：动态目录条数不对，实际 ${current().size}" }
         check(resolve("Free Model").key == "free-model") { "自检失败：新模型按展示名解析失败" }
         check(byKey("free-model")?.free == true) { "自检失败：新免费模型未标记免费" }
-        // 动态目录里 auto / free-model 都是 0，加上内置的 dfmodel / qmodel_38flash → 4
+        // 动态目录里 auto / free-model 都是 0，加上内置的 dfmodel / qfmodel → 4
         check(freeCount() == 4) { "自检失败：免费模型数应为 4（内置2 + 目录2），实际 ${freeCount()}" }
 
         // 空/垃圾输入绝不能把目录清空
@@ -504,12 +507,12 @@ object QoderModelCatalog {
         check(parseCatalogJson("not json").isEmpty()) { "自检失败：非 JSON 应解析为空" }
         check(parseCatalogJson("""{"foo":"bar"}""").isEmpty()) { "自检失败：无模型文档应解析为空" }
         setDynamic(parseCatalogJson("not json"))
-        check(current().size == 19) { "自检失败：解析失败必须退回内置清单，不能清空" }
+        check(current().size == 20) { "自检失败：解析失败必须退回内置清单，不能清空" }
 
         // ---- /v1/models 形状 ----
         setDynamic(null)
         val models = openAiModels()
-        check(models.length() == 19) { "自检失败：/v1/models 条数不对" }
+        check(models.length() == 20) { "自检失败：/v1/models 条数不对" }
         val first = models.getJSONObject(0)
         check(first.getString("object") == "model") { "自检失败：object 字段必须是 model" }
         check(first.getString("id") == DEFAULT_KEY) { "自检失败：首个模型 id 不对" }

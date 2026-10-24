@@ -1025,8 +1025,24 @@ class MainActivity : Activity() {
         thread(name = "qoder-catalog-sync") {
             val jt = QoderAuthApi.validJobTokenFor(this, cred, 60L * 60L * 1000L)
                 ?: cred.jobToken.takeIf { it.isNotBlank() }
-            val raw = if (jt.isNullOrBlank()) null else QoderAuthApi.fetchModelCatalog(jt, cred.mode)
-            val parsed = if (raw == null) emptyList() else QoderModelCatalog.parseCatalogJson(raw)
+            var raw: String? = null
+            var parsed: List<QoderModelCatalog.QModel> = emptyList()
+            if (!jt.isNullOrBlank()) {
+                // ① 首选：COSY 签名的动态目录（与桌面版模型选择器同源，"此刻"最准）
+                raw = QoderUpstream.fetchModelListRaw(this, cred, jt)
+                parsed = if (raw == null) emptyList() else QoderModelCatalog.parseCatalogJson(raw)
+                if (parsed.isEmpty()) {
+                    // ② 退一步：openapi 的 /api/v1/models（响应形状没实测过，能出就用）
+                    val alt = QoderAuthApi.fetchModelCatalog(jt, cred.mode)
+                    val altParsed = if (alt == null) emptyList() else QoderModelCatalog.parseCatalogJson(alt)
+                    if (altParsed.isNotEmpty()) {
+                        raw = alt
+                        parsed = altParsed
+                    } else if (raw == null) {
+                        raw = alt
+                    }
+                }
+            }
             if (raw != null && parsed.isNotEmpty()) {
                 QoderModelCatalog.setDynamic(parsed)
                 QoderModelCatalog.save(this, raw)
@@ -1462,11 +1478,12 @@ class MainActivity : Activity() {
         if (GatewayBackend.hasQoderAccount(this@MainActivity)) {
             addView(card(tone = CardTone.SOFT) {
                 addView(text("官方模型目录", FS_CARD_TITLE, true))
-                addView(caption("官方 UI 上显示的名字只是**展示名**，请求要的是 key；倍率同理，" +
-                    "只有官方目录里的才是准的。拉不到就导入 Qoder CLI 的缓存文件（内容是一段 base64，整段粘贴即可）。"), top(6))
-                addView(action("同步官方目录", outlined = true, full = true) { refreshModels() }, top(10))
-                addView(action("导入 catalog-v7（CLI 缓存）", outlined = true, full = true) { promptImportCatalog() }, top(8))
-                addView(linkAction("查看上次拉取的原文（排查用）") { showLastCatalogRaw() }, top(10))
+                addView(caption("进这个页面会**自动**从官方拉一次目录（COSY 签名直连，与桌面版模型选择器同源），" +
+                    "拿到的是准确 key + 当前倍率 + 上下文，不用你做任何事。"), top(6))
+                addView(action("立即同步官方目录", outlined = true, full = true) { refreshModels() }, top(10))
+                addView(caption("同步失败才需要兜底：导入 Qoder CLI 的缓存文件（一段 base64，整段粘贴，App 自己解密）。"), top(10))
+                addView(linkAction("导入 catalog-v7（兜底）") { promptImportCatalog() }, top(8))
+                addView(linkAction("查看上次拉取的原文（排查用）") { showLastCatalogRaw() }, top(8))
             }, top(GAP))
         }
 

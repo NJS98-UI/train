@@ -8,6 +8,37 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.4.17] - 2026-10-17
+
+### Added
+- **COSY 签名的官方模型目录直连**：`GET {infer}/algo/api/v2/model/list`（空 body）。
+  这是官方数据源里"此刻"最准的那个（与桌面版模型选择器同源），
+  现在**进模型页自动拉一次**，不需要用户导入任何文件、不需要额外认证。
+  - 签名与聊天请求同一套 COSY 方案，只有三处不同：body 为空、签名路径是
+    `/api/v2/model/list`（**不含** `/algo` 前缀，参考实现 `computeSigPath` 会剥掉）、
+    不带 `X-Model-Key` / `X-Model-Source`。
+  - `QoderCosyCrypto.authorization(...)` 增加 `signedPath` 参数（默认仍是聊天路径，
+    老调用点行为不变）；新增 `NATIVE_MODEL_LIST_PATH` / `MODEL_LIST_SIGNED_PATH`。
+  - `QoderUpstream.fetchModelListRaw(...)`：失败时把 HTTP 码与响应原文写进
+    `QoderAuthApi.lastCatalogError/lastCatalogRaw`，供「查看上次拉取的原文」排查。
+  - 取数顺序：签名目录 → openapi `/api/v1/models` → 内置清单（逐级降级，永不空表）。
+
+### Changed
+- **内置模型清单的 key 全部换成官方真 key**（来自官方目录快照解密导出），
+  之前三个"按命名规律推断"的 key **全错**，已修正并去掉 `unverified` 标记：
+  - Sonus：`sonus` → **`smodel`**
+  - Qwen3.8-Flash：`qmodel_38flash` → **`qfmodel`**
+  - GLM-5.3-Flash：`gm53flash` → **`gfmodel`**
+  - 同时补齐 `q37fmodel`（Qwen3.7-Flash），内置 19 → **20 条**。
+- 模型页「官方模型目录」卡改成：进页面自动同步，手动同步降级为次要按钮，
+  CLI 缓存导入明确标注为**兜底**（同步失败才需要）。
+
+### Notes
+- 官方目录接口的响应形状已按"分组 / 递归扫描"容错解析，并保留原文；
+  万一上游改结构，`lastCatalogRaw` 里能直接看到。
+- 内置清单里的倍率仍以官方 APP 当前显示值为准；动态拉取成功时**以拉到的为准**
+  （两者不一致是因为快照时刻/促销窗口不同，不是 bug）。
+
 ## [0.4.16] - 2026-10-17
 
 ### Changed
