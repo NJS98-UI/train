@@ -31,6 +31,7 @@ object CreditMonitor {
     private const val PREFS = "traework2api_prefs"
     private const val KEY_AUTO = "auto_switch_enabled"
     private const val KEY_THRESHOLD = "auto_switch_threshold"
+    private const val KEY_INTERVAL = "monitor_interval_sec"
 
     /** 主线程 Handler：把快照回调切回 UI 线程。 */
     private val main = Handler(Looper.getMainLooper())
@@ -74,6 +75,18 @@ object CreditMonitor {
         prefs(ctx).edit().putLong(KEY_THRESHOLD, v.coerceAtLeast(0L)).apply(); stale = true
     }
 
+    /**
+     * 检测间隔（秒），0-60。
+     *
+     * 0 表示**暂停检测**：只保留服务转发，不再轮询积分/自动换号。
+     * 用户要的是"自己定节奏"，所以这里不做固定档位，直接给 0-60 的连续值。
+     */
+    fun intervalSec(ctx: Context): Int = prefs(ctx).getInt(KEY_INTERVAL, 2).coerceIn(0, 60)
+
+    fun setIntervalSec(ctx: Context, v: Int) {
+        prefs(ctx).edit().putInt(KEY_INTERVAL, v.coerceIn(0, 60)).apply(); stale = true
+    }
+
     fun currentSnapshot(): Snapshot? = latest
 
     fun start(context: Context) {
@@ -95,10 +108,17 @@ object CreditMonitor {
             try { tick() } catch (e: Exception) {
                 Log.w(TAG, "tick 异常: ${e.javaClass.simpleName}: ${e.message}")
             }
+            // 间隔每轮现取：用户在界面上拖动滑块后，下一个 tick 就生效（不用重启监测）
+            val wait = appCtx?.let { intervalSec(it) * 1000L } ?: TICK_MS
+            if (wait <= 0L) {
+                // 0 = 暂停检测：睡 1 秒再读一次设置，避免空转烧 CPU
+                try { Thread.sleep(1_000) } catch (_: InterruptedException) { break }
+                continue
+            }
             var slept = 0L
-            while (running && slept < TICK_MS) {
-                try { Thread.sleep(TICK_MS - slept) } catch (_: InterruptedException) { break }
-                slept = TICK_MS
+            while (running && slept < wait) {
+                try { Thread.sleep(wait - slept) } catch (_: InterruptedException) { break }
+                slept = wait
             }
         }
     }

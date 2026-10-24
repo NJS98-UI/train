@@ -21,6 +21,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import java.text.SimpleDateFormat
@@ -75,7 +76,7 @@ class MainActivity : Activity() {
         // ---- 版权信息 ----
         // 概览页与更多页各出现一次，**共用这一份常量**：改一处两边同步，
         // 不会出现"概览页写了新邮箱、更多页还是旧的"。文案按「标签 + 值」成对给，
-        // 排版交给 `copyrightLine()`，页面里不再拼字符串。
+        // 排版在页面内直接拼，不再走统一的版权行函数。
         private const val AUTHOR_NAME = "玖念"
         private const val AUTHOR_EMAIL = "2820184772@qq.com"
         private const val AUTHOR_LABEL = "作者"
@@ -121,7 +122,6 @@ class MainActivity : Activity() {
         ACCOUNT("账号", "当前 Trae 登录状态", R.drawable.ic_account),
         MODELS("模型", "本地可用的模型表", R.drawable.ic_models),
         RECORDS("记录", "调用用量与记录", R.drawable.ic_history),
-        MORE("更多", "外观 · 说明 · 保活", R.drawable.ic_more),
     }
 
     private lateinit var contentHost: FrameLayout
@@ -267,11 +267,6 @@ class MainActivity : Activity() {
         AccountCredits.selfCheck()
         // CLI 模型缓存解密自检（HKDF-SHA256 对齐 RFC 5869 + AES-GCM 往返 + 错 uid 必须解不开）。
         QoderModelCache.selfCheck()
-        // Copilot 三件套自检：凭证过期判定 / 设备码端点与兜底 IP / 上游模型目录解析。
-        // 这三处都是"错了会静默降级"的地方（令牌过期不续 → 401；目录解析错 → 空模型表）。
-        CopilotAuthStore.selfCheck()
-        CopilotApi.selfCheck()
-        CopilotModelCatalog.selfCheck()
         // 装入按账号积分缓存：进账号页立刻有数，后台刷新再原地更新。
         AccountCredits.loadCache(this)
         // 保活页的 ROM 识别自检：SystemProperties 是隐藏 API（靠反射），读不到也不能崩。
@@ -303,7 +298,7 @@ class MainActivity : Activity() {
                 // 二级页才出现的返回入口。不靠系统返回键：纯小白不一定知道那个键，
                 // 顶栏给一个看得见的出口。放标题**上方**（不是左侧），
                 // 这样标题左边缘始终与内容区对齐。
-                addView(linkAction("← 返回") { render(Page.MORE) }
+                addView(linkAction("← 返回") { render(Page.OVERVIEW) }
                     .also { backAction = it }
                     .apply { visibility = View.GONE })
                 addView(TextView(this@MainActivity).apply {
@@ -388,7 +383,6 @@ class MainActivity : Activity() {
             Page.ACCOUNT -> accountPage()
             Page.MODELS -> modelsPage()
             Page.RECORDS -> recordsPage()
-            Page.MORE -> morePage()
         })
         // 账号页**自动拉一次**积分/额度：不拉的话三个数值位永远显示「—」，
         // 用户会以为功能坏了（实测就是这个现象），得先手动点「刷新」才有数据。
@@ -446,7 +440,7 @@ class MainActivity : Activity() {
     /** 系统返回键：停在任一二级页时先退回「更多」，而不是直接退出 App。 */
     @Deprecated("Activity.onBackPressed 已废弃，但本项目未引 androidx（无 OnBackPressedDispatcher）")
     override fun onBackPressed() {
-        if (showKeepAlive || showStyle) render(Page.MORE) else @Suppress("DEPRECATION") super.onBackPressed()
+        if (showKeepAlive || showStyle) render(Page.OVERVIEW) else @Suppress("DEPRECATION") super.onBackPressed()
     }
 
     /**
@@ -477,91 +471,63 @@ class MainActivity : Activity() {
             running -> statusChip("服务运行中", "success", true)
             else -> statusChip("服务已停止", "error", false)
         })
-        // 服务现在是**默认开启**的（进 App 自动拉起，0.4.8）。走到这个分支基本只有一种情况：
-        // 用户主动停过。文案说清"怎么再开"，别再写"本服务默认关闭"（那已经是过去式）。
-        if (!running) {
-            addView(card(tone = CardTone.SOFT) {
-                addView(text("服务未启动", FS_CARD_TITLE, true))
-                addView(caption("你（或通知栏）停止过服务，端口未在监听，客户端暂时连不上。\n" +
-                    "点下面的「启动服务」即可重新开启；下次进 App 也会保持关闭，直到你手动启动。"), top(8))
-            }, top(GAP))
-        } else {
-            addView(card(tone = CardTone.SOFT) {
-                addView(text("后台常驻中", FS_CARD_TITLE, true))
-                addView(caption("服务跑在前台服务里：退出本 App、划掉最近任务都不会断，" +
-                    "你可以切到任意客户端使用。\n停止请点下面的「停止服务」或通知栏的「停止」。"), top(8))
-                // 保活体检：国产 ROM 会无视 START_STICKY 直接强杀，能不能长期活着
-                // 取决于几项系统授权 —— 用户很难自己想到，所以这里给个醒目入口。
-                val pending = KeepAlive.check(this@MainActivity).count { !it.ok }
-                if (pending > 0) {
-                    addView(caption("⚠️ 还有 $pending 项保活设置未开启，真机上可能被系统清掉"), top(10))
-                }
-                addView(action(if (pending == 0) "保活设置：全部正常" else "去设置保活（$pending 项）",
-                    full = true, outlined = pending == 0) { openKeepAlive() }, top(10))
-            }, top(GAP))
-        }
-        // 服务地址是本页核心信息：强调卡（有底色、无阴影）+ 等宽主色地址 + 一键复制。
-        // 与官方 v0.4.12 一致：本机 / 局域网两行，base URL 都带 /v1；局域网检测不到就隐藏并给提示。
+
+        // 后台常驻：只留状态 + 两个入口（用户要求去掉全部说明文字）
+        addView(card(tone = CardTone.SOFT) {
+            val pending = KeepAlive.check(this@MainActivity).count { !it.ok }
+            addView(row {
+                addView(text(if (running) "后台常驻中" else "服务未启动", FS_CARD_TITLE, true), weighted())
+                addView(if (pending == 0) chipOk("保活就绪") else chipWarn("$pending 项待开启"))
+            })
+            addView(row(8) {
+                addView(action(if (pending == 0) "保活设置" else "去设置保活（$pending 项）", outlined = true) {
+                    openKeepAlive()
+                }, weighted())
+                addView(action("外观", outlined = true) { openStylePage() }, weighted(start = 8))
+            }, top(12))
+        }, top(GAP))
+
+        // 服务地址 + API Key 合并成一张卡（用户要求：API key 移上来和服务地址放在一起）
         val lanIp = lanAddress()
         addView(card(tone = CardTone.EMPHASIS) {
-            addView(caption("服务地址（本机使用）"))
+            addView(caption("本机地址"))
             addView(row(8) {
                 addView(mono("http://127.0.0.1:${LocalFakeServer.PORT}/v1", FS_BODY, true, "primary"), weighted())
-                // 卡底本身就是 primary_container，按钮底要换成 surface 才看得见
                 addView(linkAction("复制", overContainer = true) { copyServerUrl() })
-            }, top(6))
-            addView(caption("局域网其它设备使用"), top(10))
+            }, top(4))
             if (lanIp != null) {
+                addView(caption("局域网地址"), top(10))
                 addView(row(8) {
                     addView(mono("http://$lanIp:${LocalFakeServer.PORT}/v1", FS_BODY, true, "primary"), weighted())
                     addView(linkAction("复制", overContainer = true) { copyLanUrl(lanIp) })
-                }, top(6))
-                addView(caption("同一 WiFi 下的电脑/平板/手机等设备，base URL 填这一条；API Key 不变，用下面同一个。"), top(8))
-            } else {
-                addView(caption("未检测到局域网 IPv4（未连 WiFi/热点时属正常）；连上 WiFi 后重进本页即可显示。"), top(6))
+                }, top(4))
             }
-            addView(caption("base URL 填进任意 OpenAI 兼容客户端"), top(8))
-        }, top(GAP))
-        addView(action(busy ?: if (running) "停止服务" else "启动服务", full = true, outlined = running || busy != null) { toggleService() }
-            .apply {
-                // 处理中禁用：不给点第二次，也不让用户以为"没点动"
-                if (busy != null) { isEnabled = false; alpha = 0.6f }
-            }, top(GAP))
-        addView(card { addTraeCard(includeLogin = true) })
-        addView(card {
-            addView(caption("本地 API Key"))
+            addView(divider(), top(12))
+            addView(caption("API Key"))
             addView(row(8) {
                 addView(text(if (apiKeyVisible) apiKey else MASKED_KEY, FS_VALUE).apply {
                     setTextIsSelectable(apiKeyVisible)
                 }, weighted())
-                addView(linkAction(if (apiKeyVisible) "隐藏" else "显示") {
+                addView(linkAction(if (apiKeyVisible) "隐藏" else "显示", overContainer = true) {
                     apiKeyVisible = !apiKeyVisible
                     render(currentPage)
                 }, lp(-2, -2, start = 8))
-                addView(linkAction("复制") { copyApiKey() }, lp(-2, -2, start = 8))
-            }, top(6))
-            addView(caption("供任意 OpenAI 客户端连接鉴权使用"), top(8))
-        })
-        addView(card(tone = CardTone.SOFT) {
-            addView(text("使用引导", FS_CARD_TITLE, true))
-            addView(caption("把上面的地址与 API Key 填进任意 OpenAI 兼容客户端。要单独测某个端点，点右边的「复制」："), top(8))
-            ENDPOINTS.forEach { (method, path) ->
-                addView(row(8) {
-                    addView(mono("$method $path", FS_CAPTION, colorName = "on_surface"), weighted())
-                    addView(linkAction("复制") { copyEndpoint(path) })
-                }, top(8))
-            }
-        })
-        addView(action("登录 / 切换 Trae 账号", full = true) { openLogin() }, top(GAP))
-        addView(copyrightCard())
+                addView(linkAction("复制", overContainer = true) { copyApiKey() }, lp(-2, -2, start = 8))
+            }, top(4))
+        }, top(GAP))
+
+        addView(action(busy ?: if (running) "停止服务" else "启动服务", full = true, outlined = running || busy != null) { toggleService() }
+            .apply {
+                if (busy != null) { isEnabled = false; alpha = 0.6f }
+            }, top(GAP))
+
+        addView(card { addTraeCard() })
     }
 
-    private fun LinearLayout.addTraeCard(includeLogin: Boolean) {
+    private fun LinearLayout.addTraeCard() {
         val cred = TraeAuthStore.load(this@MainActivity)
         if (cred == null) {
             addView(text("未登录 Trae", FS_CARD_TITLE, true))
-            addView(caption("已登录后走真实 Trae 转发；当前返回固定假回复"), top(6))
-            if (includeLogin) addView(action("立即登录", full = true) { openLogin() }, top(14))
             return
         }
         val hasToken = !cred.accessToken.isBlank()
@@ -572,8 +538,6 @@ class MainActivity : Activity() {
         if (cred.uid.isNotBlank()) addView(caption("UID: ${cred.uid} · ${regionLabelFull(cred.region)}"), top(6))
         if (!cred.region.isSupported) addView(caption(TraeRegion.SG.unsupportedNote), top(4))
         if (cred.expiresAt > 0L) addView(caption("Token 到期: ${formatExp(cred.expiresAt)}"), top(4))
-        val accountCount = TraeAuthStore.list(this@MainActivity).size
-        if (accountCount > 1) addView(caption("已保存 $accountCount 个账号（在「账号」页切换）"), top(4))
     }
 
     // ------------------------------------------------------------------
@@ -584,12 +548,11 @@ class MainActivity : Activity() {
         // 本页会重建，旧的积分控件句柄必须清掉，否则刷新回来会写进已分离的 View
         creditViews.clear()
 
-        // ---- 积分总览：两个平台各一个合计 ----
-        // 放在最上面：用户进账号页的第一诉求是"我还有多少"，账号细节是第二层。
+        // ---- 积分总计（无说明）----
         addView(card {
             addView(row {
-                addView(text("积分总览", FS_CARD_TITLE, true), weighted())
-                addView(linkAction("刷新积分") {
+                addView(text("积分总计", FS_CARD_TITLE, true), weighted())
+                addView(linkAction("刷新") {
                     toast("正在查询全部账号积分…")
                     AccountCredits.refreshAll(this@MainActivity, force = true) { refreshCreditViews() }
                 })
@@ -597,273 +560,57 @@ class MainActivity : Activity() {
             creditTotalTrae = text("—", FS_METRIC, true, "primary")
             creditTotalQoder = text("—", FS_METRIC, true, "primary")
             addView(row(12) {
-                addView(creditBlock("Trae 合计", creditTotalTrae!!), weighted())
-                addView(creditBlock("Qoder 合计", creditTotalQoder!!), weighted(start = 12))
-            })
+                addView(creditBlock("Trae", creditTotalTrae!!), weighted())
+                addView(creditBlock("Qoder", creditTotalQoder!!), weighted(start = 12))
+            }, top(10))
             creditUpdated = caption("")
-            addView(creditUpdated!!, top(10))
-            addView(caption("每个账号的余量直接标在它自己的卡上，**不需要切换账号**。" +
-                "合计只累加查询成功的账号，括号里的 n/m 表示有几个账号没查到（此时合计是下界）。"), top(6))
-        })
+            addView(creditUpdated!!, top(8))
+        }, top(GAP))
 
-        addView(section("Trae 账号"))
-        val metas = TraeAuthStore.list(this@MainActivity)
-        val activeUid = TraeAuthStore.activeUid(this@MainActivity)
-        if (metas.isEmpty()) {
+        // ---- TRAE 账号 ----
+        addView(section("TRAE 账号"))
+        val traeMetas = TraeAuthStore.list(this@MainActivity)
+        val traeActive = TraeAuthStore.activeUid(this@MainActivity)
+        val traeCred = TraeAuthStore.load(this@MainActivity)
+        if (traeMetas.isEmpty()) {
             addView(card(tone = CardTone.SOFT) {
-                addView(text("未登录", FS_CARD_TITLE, true))
-                addView(caption("登录后使用 Trae 账号进行真实转发"), top(6))
-                addView(action("立即登录", full = true) { openLogin() }, top(14))
+                addView(text("未添加账号", FS_CARD_TITLE, true))
             })
         } else {
-            val cred = TraeAuthStore.load(this@MainActivity)
-            // 当前账号详情
+            // 第一张：当前使用的账号
             addView(card {
                 addView(row {
-                    addView(text(cred?.nickname?.ifBlank { null } ?: "Trae 账号", FS_CARD_TITLE, true), weighted())
+                    addView(text(traeCred?.nickname?.ifBlank { null } ?: "TRAE 账号", FS_CARD_TITLE, true), weighted())
                     addView(chipOk("当前使用"))
                 })
-                if (cred != null) {
-                    addView(labelValue("UID", cred.uid), top(12))
-                    addView(labelValue("区域", regionLabelFull(cred.region)), top(4))
-                    if (!cred.region.isSupported) addView(caption(TraeRegion.SG.unsupportedNote), top(6))
-                    addView(labelValue("Access Token", "已持久化（加密存储）"), top(4))
-                    addView(labelValue("Token 状态", tokenRenewLabel(cred.expiresAt)), top(4))
-                    if (cred.expiresAt > 0L) addView(labelValue("到期时间", formatExp(cred.expiresAt)), top(4))
-                    addView(creditLabel(AccountCredits.TRAE, cred.uid), top(4))
+                if (traeCred != null) {
+                    addView(labelValue("区域", regionLabelFull(traeCred.region)), top(10))
+                    addView(labelValue("UID", traeCred.uid), top(4))
+                    addView(labelValue("Token", tokenRenewLabel(traeCred.expiresAt)), top(4))
+                    addView(creditLabel(AccountCredits.TRAE, traeCred.uid), top(6))
                 }
             })
-            // 其它账号：点击切换，长按/按钮删除
-            val others = metas.filter { it.uid != activeUid }
-            if (others.isNotEmpty()) {
-                addView(section("其它账号（共 ${metas.size} 个已保存）"))
-                others.forEach { m ->
-                    addView(card {
-                        addView(row {
-                            addView(text(m.nickname.ifBlank { m.uid }, FS_BODY, true), weighted())
-                            if (m.region.isSupported) {
-                                addView(chipInfo(regionLabel(m.region)))
-                            } else {
-                                addView(chipWarn("${regionLabel(m.region)} · 未开发"))
-                            }
-                        })
-                        addView(caption("UID: ${m.uid} · Token: ${tokenRenewLabel(m.expiresAt)}"), top(6))
-                        addView(creditLabel(AccountCredits.TRAE, m.uid), top(2))
-                        addView(row(8) {
-                            addView(action("切换到此账号", outlined = true) { switchAccount(m.uid) }, weighted())
-                            addView(action("删除", outlined = true) { confirmRemoveAccount(m) }, weighted(start = 8))
-                        }, top(10))
-                    })
-                }
-            }
+            // 第二件：横起来的账户选择（点开弹窗，一排一个账号）
+            addView(accountBar(
+                title = traeCred?.nickname?.ifBlank { null } ?: "选择账号",
+                subtitle = traeCred?.let { regionLabel(it.region) + " · " + traeCreditText(it.uid) } ?: "",
+            ) { showTraeAccountPicker() }, top(8))
         }
-        // 登录只有这一条路：**浏览器 + 粘贴回调**。
-        // （原内置 WebView 登录窗已移除：它依赖页面 JS 回调，第三方 SDK 一超时就等不到回调，
-        //  部分网络下必失败；这条不依赖 WebView/页面 JS，是实测可用路径。）
-        addView(card {
-            addView(text("登录（浏览器 + 粘贴回调）", FS_CARD_TITLE, true))
-            addView(caption(
-                "1. 按区域复制登录链接\n" +
-                "2. 在电脑或手机浏览器打开并登录\n" +
-                "3. 登录后地址栏停在 127.0.0.1:18080 打不开是正常的\n" +
-                "4. 复制地址栏那条完整链接，回到这里粘贴"), top(8))
-            addView(action("复制国服登录链接", outlined = true) { copyLoginUrl(TraeRegion.CN) }, top(12))
-            addView(action("复制国际服登录链接（未开发）", outlined = true) {
-                toast(TraeRegion.SG.unsupportedNote)
-                copyLoginUrl(TraeRegion.SG)
-            }, top(8))
-            addView(caption(TraeRegion.SG.unsupportedNote), top(6))
-            addView(action("粘贴回调链接完成登录", full = true) { promptPasteCallback() }, top(12))
-        })
-        addView(section("积分与用量"))
-        // 登录状态在这里算一次，供签到文案用（避免在文案函数里重复 KeyStore 解密）
-        val loggedIn = TraeAuthStore.activeUid(this@MainActivity) != null
-        addView(card {
-            // 内边距加宽：linkAction 默认左右各 14dp，"刷新"两字只有 ~54dp 宽，
-            // 配 48dp 高就成了一个正圆。让它随文字自适应撑成胶囊（"刷新中…"也不会被截断）。
-            val refreshLabel = linkAction(if (quotaLoading) "刷新中…" else "刷新") { refreshQuota() }
-                .apply { setPadding(dp(24), 0, dp(24), 0) }
-            // 刻意**不用 action()（Button）**：Material Button 的默认 style 自带
-            // minHeight=48dp 与 inset 阴影，minimumHeight 压不下去 —— 已签时想把它缩成
-            // 一枚 32dp 小 chip 根本做不到（实测仍是 48dp 的砖）。TextView + 自绘背景
-            // 高度完全可控，也和项目里其它胶囊（linkAction / chip）同一套做法。
-            val checkinAction = TextView(this@MainActivity).apply {
-                gravity = Gravity.CENTER
-                setOnClickListener { claimCheckin() }
-            }
-            // 未登录时 accountCheckin 为 null，quotaApply 不会被调用，所以这里先按初值同步一次状态
-            refreshCheckinButton(checkinAction, loggedIn)
-            val balanceView = text(quotaValue(accountBalance?.toString()), FS_METRIC, true, "primary")
-            // 奖励说明（补充信息）：按钮已经说了"今日已签到"，这里不再重复状态，只说能领多少
-            val rewardView = caption(quotaValue(checkinRewardLabel())).apply {
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            // 登记"怎么把最新数据刷进这几个控件"，刷新时直接调用（见 quotaApply 的注释）
-            quotaApply = {
-                refreshLabel.text = if (quotaLoading) "刷新中…" else "刷新"
-                balanceView.text = quotaValue(accountBalance?.toString())
-                rewardView.text = quotaValue(checkinRewardLabel())
-                refreshCheckinButton(checkinAction, loggedIn)
-            }
-            addView(row {
-                addView(caption("当前可用积分"), weighted())
-                addView(refreshLabel, lp(-2, -2))
-            })
-            // 主数值独占一行：原先它和两个胶囊挤在同一行，行高被 48dp 按钮撑开，数值反被压住
-            addView(balanceView, top(2))
-            // 签到单独一行：按钮（仅在可签时是主色）+ 右侧奖励说明。
-            // 高度留给 refreshCheckinButton 用 minimumHeight 控制（已签时会缩成一枚小 chip），
-            // 这里不能写死 dp(48)，否则固定高度会盖掉它的收缩。
-            addView(row {
-                addView(checkinAction, lp(-2, -2))
-                addView(rewardView, lp(-2, -2, start = 12))
-            }, top(14))
-        })
-
-        // ---- 积分监测 · 自动换号 ----
-        var autoSwitchLabel: TextView? = null
-        var thresholdLabel: TextView? = null
-        var qoderCreditView: TextView? = null
-        addView(card {
-            addView(text("积分监测（每 2 秒）", FS_CARD_TITLE, true))
-            addView(caption("服务运行时每 2 秒检测当前账号积分；当前账号用完就自动切到还有积分的账号。"), top(6))
-            autoSwitchLabel = linkAction(
-                if (CreditMonitor.isAutoSwitchEnabled(this@MainActivity)) "自动换号：开" else "自动换号：关"
-            ) {
-                val nv = !CreditMonitor.isAutoSwitchEnabled(this@MainActivity)
-                CreditMonitor.setAutoSwitchEnabled(this@MainActivity, nv)
-                autoSwitchLabel?.text = if (nv) "自动换号：开" else "自动换号：关"
-            }
-            thresholdLabel = linkAction("换号阈值：≤ ${CreditMonitor.threshold(this@MainActivity)}") {
-                val cur = CreditMonitor.threshold(this@MainActivity)
-                val next = when (cur) { 0L -> 5L; 5L -> 20L; else -> 0L }
-                CreditMonitor.setThreshold(this@MainActivity, next)
-                thresholdLabel?.text = "换号阈值：≤ $next"
-            }
-            addView(row(top = 12) {
-                addView(autoSwitchLabel!!, weighted())
-                addView(thresholdLabel!!, weighted(start = 8))
-            })
-        })
-
-        // ---- 账号导出 / 导入（JSON，换设备一键登录）----
-        addView(card {
-            addView(text("账号导出 / 导入（JSON）", FS_CARD_TITLE, true))
-            addView(caption("导出包含全部 Trae + Qoder 账号的明文 token/PAT（等于账号钥匙，请妥善保管）。" +
-                "换设备时在新机导入即可一键登录。也可「复制」走剪贴板。"), top(6))
-            addView(row(top = 12) {
-                addView(action("导出账号(JSON)", outlined = true) { exportAccounts() }, weighted())
-                addView(action("导入账号(JSON)", outlined = true) { importAccounts() }, weighted(start = 8))
-            })
-            addView(action("复制账号 JSON 到剪贴板", outlined = true, full = true) { copyAccountsJson() }, top(8))
-        })
+        addView(row(8) {
+            addView(action("登录账号") { startTraeLogin() }, weighted())
+            addView(action("粘贴回调链接", outlined = true) { promptPasteCallback() }, weighted(start = 8))
+        }, top(10))
 
         // ---- Qoder 账号 ----
-        addView(section("GitHub Copilot 账号"))
-
-        // Copilot 与 Trae/Qoder 的差别：**只有一个账号**，登录一次就行，
-        // 短时令牌由 App 自动续（用户不需要看到 "token 过期" 这种事）。
-        run {
-            val cred = CopilotAuthStore.load(this@MainActivity)
-            addView(card {
-                addView(row {
-                    addView(
-                        text(
-                            if (cred == null) "未登录" else cred.login.ifBlank { "已登录" },
-                            FS_CARD_TITLE, true,
-                        ),
-                        weighted(),
-                    )
-                    if (cred != null) {
-                        val planText = cred.plan.ifBlank { cred.sku }
-                        if (planText.isBlank()) addView(chipOk("已登录"))
-                        else addView(chipOk(planText))
-                    }
-                })
-                addView(
-                    caption(
-                        if (cred == null) {
-                            "用 GitHub 账号登录后，Copilot 的模型会出现在模型列表里，" +
-                                "聊天请求同样走本地 ${LocalFakeServer.PORT} 转发。\n" +
-                                "点下面的按钮拿设备码，在 ${CopilotApi.HOST_WEB}/login/device 输入即可。"
-                        } else {
-                            "套餐 ${cred.sku.ifBlank { "未知" }} · Copilot 令牌约 30 分钟自动续期，" +
-                                "过期会在下一次请求时无感刷新，不用手动处理。"
-                        },
-                    ),
-                    top(6),
-                )
-                addView(row(8) {
-                    addView(
-                        action(if (cred == null) "登录 GitHub" else "重新登录") { startCopilotLogin() },
-                        if (cred == null) lp(-1, dp(48)) else lp(-2, dp(48)),
-                    )
-                    if (cred != null) {
-                        addView(action("退出登录", outlined = true, danger = true) {
-                            CopilotAuthStore.clear(this@MainActivity)
-                            CopilotModelCatalog.clear()
-                            render(currentPage)
-                            toast("已退出 Copilot")
-                        }, lp(-2, dp(48)))
-                    }
-                }, top(10))
-            })
-        }
-
         addView(section("Qoder 账号"))
-
-        // ---- 聊天转发后端（Trae / Qoder）----
-        // 放在账号卡之前：用户看到"能不能转发"是第一诉求，账号细节是第二层。
-        run {
-            val now = GatewayBackend.resolved(this@MainActivity)
-            val isQ = now == GatewayBackend.QODER
-            val mixed = GatewayBackend.isMixed(this@MainActivity)
-            addView(card(tone = CardTone.SOFT) {
-                addView(row {
-                    addView(text("聊天转发后端", FS_CARD_TITLE, true), weighted())
-                    addView(chipInfo(GatewayBackend.describe(this@MainActivity)))
-                })
-                addView(caption(
-                    when {
-                        mixed -> "本地 ${LocalFakeServer.PORT} 网关**按模型自动路由**：两个平台的模型都出现在 " +
-                            "`/v1/models` 里，客户端请求 Qoder 的模型就发给 Qoder（COSY 签名），" +
-                            "其余发给 Trae。不用手动切。"
-                        isQ -> "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Qoder**（COSY 签名链路），" +
-                            "模型表 ${QoderModelCatalog.current().size} 个（" +
-                            (if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单") +
-                            "，${QoderModelCatalog.freeCount()} 个免费）；不需要 Trae 登录。"
-                        else -> "本地 ${LocalFakeServer.PORT} 网关当前转发给 **Trae**（solo_work_remote），" +
-                            "模型表来自「模型」页刷新；Qoder 账号此刻不参与转发（要转发点下面的按钮切后端）。"
-                    }
-                ), top(6))
-                addView(row(8) {
-                    addView(action(if (isQ) "切到 Trae" else "切到 Qoder", outlined = true) {
-                        GatewayBackend.set(this@MainActivity,
-                            if (isQ) GatewayBackend.TRAE else GatewayBackend.QODER)
-                        toast("转发后端已切到 ${GatewayBackend.label(GatewayBackend.resolved(this@MainActivity))}")
-                        render(currentPage)
-                    }, weighted())
-                    addView(action("自动选择", outlined = true) {
-                        GatewayBackend.set(this@MainActivity, GatewayBackend.AUTO)
-                        toast("转发后端：自动（有 Trae 走 Trae，否则有 Qoder 走 Qoder）")
-                        render(currentPage)
-                    }, weighted(start = 8))
-                }, top(10))
-            })
-        }
-
         val qMetas = QoderAuthStore.list(this@MainActivity)
         val qActive = QoderAuthStore.activeUid(this@MainActivity)
+        val qActiveMeta = qMetas.firstOrNull { it.uid == qActive }
         if (qMetas.isEmpty()) {
             addView(card(tone = CardTone.SOFT) {
-                addView(text("未添加 Qoder 账号", FS_CARD_TITLE, true))
-                addView(caption("Qoder 用「个人访问令牌 PAT」登录：在 Qoder 账号集成页创建 pt- 令牌后粘贴到" +
-                    "国内/国际版对应区域。登录后**可作本地聊天转发后端**（COSY 签名链路），" +
-                    "也可只用来查积分/领 Credits。"), top(6))
-                addView(action("粘贴 PAT 登录", full = true) { promptQoderPat() }, top(14))
+                addView(text("未添加账号", FS_CARD_TITLE, true))
             })
         } else {
-            val qActiveMeta = qMetas.firstOrNull { it.uid == qActive }
             qoderCreditView = text(qoderRemainingLabel(), FS_METRIC, true, "primary")
             addView(card {
                 addView(row {
@@ -871,82 +618,317 @@ class MainActivity : Activity() {
                     addView(chipOk("当前使用"))
                 })
                 if (qActiveMeta != null) {
-                    addView(labelValue("UID", qActiveMeta.uid), top(10))
-                    addView(labelValue("区域", if (qActiveMeta.mode == QoderAuthApi.MODE_GLOBAL) "国际版" else "国内版"), top(4))
-                    addView(labelValue("邮箱", qActiveMeta.email.ifBlank { "—" }), top(4))
+                    addView(labelValue("区域", if (qActiveMeta.mode == QoderAuthApi.MODE_GLOBAL) "国际版" else "国内版"), top(10))
+                    addView(labelValue("UID", qActiveMeta.uid), top(4))
+                    if (qActiveMeta.email.isNotBlank()) addView(labelValue("邮箱", qActiveMeta.email), top(4))
                 }
-                addView(caption("当前 Qoder 积分余量"), top(10))
+                addView(caption("积分"), top(10))
                 addView(qoderCreditView!!, top(2))
-                // 每日可领 Credits（campaigns/claim）：领到的直接进入账号额度，随后由积分监测反映。
-                addView(caption("每日可领 Credits（Qoder「每天领 Credits」活动）"), top(12))
-                addView(action(qoderClaimLabel(), full = true) { claimQoderDaily() }, top(6))
             })
-            val qOthers = qMetas.filter { it.uid != qActive }
-            if (qOthers.isNotEmpty()) {
-                addView(section("其它 Qoder 账号（共 ${qMetas.size} 个）"))
-                qOthers.forEach { m ->
-                    addView(card {
-                        addView(row {
-                            addView(text(m.name.ifBlank { m.uid }, FS_BODY, true), weighted())
-                            addView(chipInfo(if (m.mode == QoderAuthApi.MODE_GLOBAL) "国际" else "国内"))
-                        })
-                        addView(caption("UID: ${m.uid}"), top(6))
-                        addView(creditLabel(AccountCredits.QODER, m.uid), top(2))
-                        addView(row(8) {
-                            addView(action("切换到此账号", outlined = true) { switchQoderAccount(m.uid) }, weighted())
-                            addView(action("删除", outlined = true) { confirmRemoveQoder(m) }, weighted(start = 8))
-                        }, top(10))
-                    })
-                }
-            }
-            addView(action(qoderBatchClaimLabel(), outlined = true, full = true) { claimQoderDailyAll() }, top(8))
+            addView(accountBar(
+                title = qActiveMeta?.name?.ifBlank { null } ?: "选择账号",
+                subtitle = qActiveMeta?.let {
+                    (if (it.mode == QoderAuthApi.MODE_GLOBAL) "国际版" else "国内版") + " · " +
+                        qoderCreditText(it.uid)
+                } ?: "",
+            ) { showQoderAccountPicker() }, top(8))
+        }
+        // 添加 Qoder 账号：两个按钮（登录跳浏览器 / 回填令牌）
+        addView(row(8) {
+            addView(action("登录 Qoder") { showQoderLoginGuide() }, weighted())
+            addView(action("回填令牌", outlined = true) { promptQoderPat() }, weighted(start = 8))
+        }, top(10))
 
-            // ---- 每日定时领取（闹钟 + 进 App 补签）----
-            addView(card {
-                addView(text("每日定时领取", FS_CARD_TITLE, true))
-                addView(caption("到点自动为全部 Qoder 账号领每日 Credits；进 App 会补签" +
-                    "（无开机自启，重启后打开一次即补）。默认关闭。"), top(6))
-                val on = QoderCheckin.isEnabled(this@MainActivity)
-                val schedLabel = linkAction(if (on) "定时领取：开" else "定时领取：关") {
+        // ---- 聊天转发后端：三个按钮，当前选择绿色高亮 ----
+        addView(section("聊天转发后端"))
+        run {
+            val sel = GatewayBackend.selection(this@MainActivity)
+            fun pick(b: String) {
+                GatewayBackend.set(this@MainActivity, b)
+                toast("转发后端：${GatewayBackend.label(b)}")
+                render(currentPage)
+            }
+            addView(row(8) {
+                addView(action("TRAE", outlined = sel != GatewayBackend.TRAE) { pick(GatewayBackend.TRAE) }, weighted())
+                addView(action("Qoder", outlined = sel != GatewayBackend.QODER) { pick(GatewayBackend.QODER) }, weighted(start = 8))
+                addView(action("自动", outlined = sel != GatewayBackend.AUTO) { pick(GatewayBackend.AUTO) }, weighted(start = 8))
+            })
+            addView(caption(GatewayBackend.describe(this@MainActivity)), top(8))
+        }
+
+        // ---- 积分检测（无说明）----
+        addView(section("积分检测"))
+        addView(card {
+            val cur = CreditMonitor.threshold(this@MainActivity)
+            addView(row {
+                addView(text("换号阈值", FS_VALUE, true), weighted())
+                addView(chipInfo("≤ $cur"))
+            })
+            addView(row(8) {
+                listOf(5L, 10L, 15L, 20L).forEachIndexed { i, v ->
+                    addView(action("$v", outlined = cur != v) {
+                        CreditMonitor.setThreshold(this@MainActivity, v)
+                        render(currentPage)
+                    }, weighted(start = if (i == 0) 0 else 8))
+                }
+            }, top(10))
+            val interval = CreditMonitor.intervalSec(this@MainActivity)
+            addView(row {
+                addView(text("检测间隔", FS_VALUE, true), weighted())
+                addView(chipInfo(if (interval == 0) "已暂停" else "$interval 秒"))
+            }, top(18))
+            val seek = SeekBar(this@MainActivity).apply {
+                max = 60
+                progress = interval
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
+                        if (fromUser) CreditMonitor.setIntervalSec(this@MainActivity, value)
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: SeekBar?) { render(currentPage) }
+                })
+            }
+            addView(seek, top(6))
+            addView(row {
+                addView(caption("0"), weighted())
+                addView(caption("60"))
+            }, top(2))
+        }, top(8))
+
+        // ---- 账户导出：只留导出 / 导入 ----
+        addView(section("账户导出"))
+        addView(row(8) {
+            addView(action("导出", outlined = true) { exportAccounts() }, weighted())
+            addView(action("导入", outlined = true) { importAccounts() }, weighted(start = 8))
+        }, top(8))
+
+        // ---- 一键签到（所有账号 / 所有平台）----
+        addView(section("一键签到"))
+        val loggedIn = traeActive != null
+        addView(card {
+            val checkinAction = TextView(this@MainActivity).apply {
+                gravity = Gravity.CENTER
+                setOnClickListener { claimAllCheckin() }
+            }
+            refreshCheckinButton(checkinAction, loggedIn)
+            val statusView = caption("")
+            quotaApply = {
+                refreshCheckinButton(checkinAction, loggedIn)
+                statusView.text = checkinStatusText()
+            }
+            statusView.text = checkinStatusText()
+            addView(checkinAction, lp(-1, -2))
+            addView(statusView, top(10))
+
+            addView(divider(), top(14))
+            val on = QoderCheckin.isEnabled(this@MainActivity)
+            addView(row {
+                addView(text("定时领取", FS_VALUE, true), weighted())
+                addView(linkAction(if (on) "已开启" else "已关闭") {
                     if (QoderCheckin.isEnabled(this@MainActivity)) {
-                        QoderCheckin.disable(this@MainActivity); toast("已关闭 Qoder 定时领取")
+                        QoderCheckin.disable(this@MainActivity); toast("已关闭定时领取")
                     } else {
                         QoderCheckin.enable(this@MainActivity, QoderCheckin.timeText(this@MainActivity))
                         toast("已开启，每天 ${QoderCheckin.timeText(this@MainActivity)}")
                     }
                     render(currentPage)
-                }
-                val timeLabel = linkAction("时刻 ${QoderCheckin.timeText(this@MainActivity)}") {
-                    val next = nextQoderTime(QoderCheckin.timeText(this@MainActivity))
-                    if (QoderCheckin.isEnabled(this@MainActivity))
-                        QoderCheckin.enable(this@MainActivity, next)
-                    else QoderCheckin.setTime(this@MainActivity, next)
-                    render(currentPage)
-                }
-                addView(row(12) {
-                    addView(schedLabel, weighted())
-                    addView(timeLabel, weighted(start = 8))
-                })
-                val last = QoderCheckin.lastResults(this@MainActivity)
-                if (last != null) {
-                    addView(caption("上次 ${last.date}：" +
-                        last.results.joinToString("；") { QoderCheckin.statusLabel(it) }), top(10))
-                }
-            }, top(8))
-
-            addView(action("粘贴 PAT 添加 Qoder 账号", outlined = true, full = true) { promptQoderPat() }, top(8))
-        }
+                }, lp(-2, -2, start = 8))
+                addView(linkAction(QoderCheckin.timeText(this@MainActivity)) { promptCustomTime() },
+                    lp(-2, -2, start = 8))
+            }, top(12))
+        }, top(8))
 
         // 先用缓存把数字画上（进页面立刻有数），再后台刷新全部账号
         refreshCreditViews()
         AccountCredits.refreshAll(this@MainActivity) { refreshCreditViews() }
 
-        // 登记"监测器要把哪些控件原地刷新"（Qoder 余量 + 自动换号/阈值状态）
+        // 登记"监测器要把哪些控件原地刷新"
         monitorApply = {
             qoderCreditView?.text = qoderRemainingLabel()
-            autoSwitchLabel?.text = if (CreditMonitor.isAutoSwitchEnabled(this@MainActivity)) "自动换号：开" else "自动换号：关"
-            thresholdLabel?.text = "换号阈值：≤ ${CreditMonitor.threshold(this@MainActivity)}"
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 账号页的交互零件
+    // ------------------------------------------------------------------
+
+    /** 横向账户选择条：点一下弹窗选账号（一排一个，当前账号后打绿勾）。 */
+    private fun accountBar(title: String, subtitle: String, onClick: () -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = shape("surface", RADIUS_CARD, "outline_variant")
+            isClickable = true
+            setOnClickListener { onClick() }
+            setPadding(dp(CARD_PAD), dp(14), dp(CARD_PAD), dp(14))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(text(title, FS_VALUE, true))
+                if (subtitle.isNotBlank()) addView(caption(subtitle), top(2))
+            }, weighted())
+            addView(text("\u25BE", FS_CARD_TITLE, true, "on_surface_variant"))
+        }
+
+    /** 某个 Trae 账号的积分文本（"积分：123" / "积分：—"）。 */
+    private fun traeCreditText(uid: String): String =
+        "积分：" + AccountCredits.label(AccountCredits.current().trae(uid))
+
+    private fun qoderCreditText(uid: String): String =
+        "积分：" + AccountCredits.label(AccountCredits.current().qoder(uid))
+
+    /** Trae 账号选择弹窗：每行 = 用户名 · 区域 · 积分，当前账号后面一个绿勾。顺序不动。 */
+    private fun showTraeAccountPicker() {
+        val metas = TraeAuthStore.list(this)
+        val active = TraeAuthStore.activeUid(this)
+        if (metas.isEmpty()) { toast("还没有账号"); return }
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        metas.forEach { m ->
+            panel.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(6), dp(14), dp(6), dp(14))
+                isClickable = true
+                setOnClickListener {
+                    pickerDialogRef?.dismiss()
+                    if (m.uid != active) switchAccount(m.uid)
+                }
+                addView(text(m.nickname.ifBlank { m.uid }, FS_VALUE, true), weighted())
+                addView(caption(regionLabel(m.region)), lp(-2, -2, start = 8))
+                addView(caption(traeCreditText(m.uid)), lp(-2, -2, start = 10))
+                if (m.uid == active) {
+                    addView(text("\u2713", FS_CARD_TITLE, true, "success"), lp(-2, -2, start = 10))
+                }
+            })
+            panel.addView(divider())
+        }
+        showPickerDialog("选择 Trae 账号", panel)
+    }
+
+    /** Qoder 账号选择弹窗：同样的排版与规则。 */
+    private fun showQoderAccountPicker() {
+        val metas = QoderAuthStore.list(this)
+        val active = QoderAuthStore.activeUid(this)
+        if (metas.isEmpty()) { toast("还没有账号"); return }
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        metas.forEach { m ->
+            panel.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(6), dp(14), dp(6), dp(14))
+                isClickable = true
+                setOnClickListener {
+                    pickerDialogRef?.dismiss()
+                    if (m.uid != active) switchQoderAccount(m.uid)
+                }
+                addView(text(m.name.ifBlank { m.uid }, FS_VALUE, true), weighted())
+                addView(caption(if (m.mode == QoderAuthApi.MODE_GLOBAL) "国际版" else "国内版"), lp(-2, -2, start = 8))
+                addView(caption(qoderCreditText(m.uid)), lp(-2, -2, start = 10))
+                if (m.uid == active) {
+                    addView(text("\u2713", FS_CARD_TITLE, true, "success"), lp(-2, -2, start = 10))
+                }
+            })
+            panel.addView(divider())
+        }
+        showPickerDialog("选择 Qoder 账号", panel)
+    }
+
+    /** 统一样式的列表弹窗（只有关闭键；行自己处理点击）。 */
+    private var pickerDialogRef: AlertDialog? = null
+
+    private fun showPickerDialog(title: String, panel: View) {
+        val dlg = confirmDialog(
+            title = title,
+            message = "",
+            okText = "关闭",
+            cancelText = null,
+            content = panel,
+        ) { }
+        pickerDialogRef = dlg
+    }
+
+    /** Trae 登录：复制链接并直接跳浏览器（登录后回到「粘贴回调链接」）。 */
+    private fun startTraeLogin() {
+        val region = TraeRegion.current
+        if (!region.canLogin) { toast("${region.id} 区域未开放"); return }
+        TraeRegion.set(this, region)
+        val url = TraeAuthApi.buildLoginUrl()
+        copyToClipboard("traeLoginUrl", url, "登录链接已复制")
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: Exception) {
+            toast("没有可用浏览器，链接已复制，请手动打开")
+        }
+    }
+
+    /** Qoder 登录：先给登录说明，确认才跳浏览器。 */
+    private fun showQoderLoginGuide() {
+        confirmDialog(
+            title = "登录 Qoder",
+            message = "1. 登录后点左侧「服务集成」\n" +
+                "2. 在「个人访问令牌」处生成并复制令牌\n" +
+                "3. 回到本页点「回填令牌」粘贴",
+            okText = "打开浏览器",
+        ) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://qoder.com/account/integrations")))
+            } catch (_: Exception) {
+                copyToClipboard("qoderUrl", "https://qoder.com/account/integrations", "链接已复制，请用浏览器打开")
+            }
+        }
+    }
+
+    /** 定时领取时间：自定义输入 HH:mm（不固定档位）。 */
+    private fun promptCustomTime() {
+        val edit = EditText(this).apply {
+            hint = "HH:mm"
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_DATETIME
+            setText(QoderCheckin.timeText(this@MainActivity))
+            setTextColor(color("on_surface"))
+            setHintTextColor(color("on_surface_variant"))
+            background = shape("surface_container", RADIUS_CONTROL)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        confirmDialog(
+            title = "定时领取时间",
+            message = "",
+            okText = "确定",
+            content = edit,
+        ) {
+            val t = edit.text?.toString()?.trim().orEmpty()
+            if (!Regex("^([01]?\\d|2[0-3]):[0-5]\\d$").matches(t)) {
+                toast("时间格式应为 HH:mm")
+                return@confirmDialog
+            }
+            if (QoderCheckin.isEnabled(this@MainActivity)) {
+                QoderCheckin.enable(this@MainActivity, t)
+            } else {
+                QoderCheckin.setTime(this@MainActivity, t)
+            }
+            toast("定时领取：每天 $t")
+            render(currentPage)
+        }
+    }
+
+    /** 一键签到：Trae 与 Qoder **所有账号**都跑一遍。 */
+    private fun claimAllCheckin() {
+        var any = false
+        if (TraeAuthStore.activeUid(this) != null) { claimCheckin(); any = true }
+        if (QoderAuthStore.list(this).isNotEmpty()) { claimQoderDailyAll(); any = true }
+        if (!any) toast("没有可签到的账号")
+    }
+
+    /** 一键签到卡下面的状态文字（两个平台各一句，没数据就不编）。 */
+    private fun checkinStatusText(): String {
+        val parts = ArrayList<String>()
+        accountCheckin?.let {
+            parts.add("Trae：" + if (it.checkedIn) "今日已签到" else if (!it.enable) "未开放" else "可签到")
+        }
+        val last = QoderCheckin.lastResults(this)
+        if (last != null) {
+            parts.add("Qoder " + last.date + "：" + last.results.joinToString("；") { QoderCheckin.statusLabel(it) })
+        }
+        return parts.joinToString("  ·  ")
     }
 
     // ------------------------------------------------------------------
@@ -1506,15 +1488,10 @@ class MainActivity : Activity() {
                 GatewayBackend.isMixed(this@MainActivity) ->
                     "已加载 · $n 个模型（Trae ${ModelsRepo.current().length()} + Qoder " +
                         "${QoderModelCatalog.current().size}，按模型路由）"
-                GatewayBackend.hasQoderAccount(this@MainActivity) &&
-                    GatewayBackend.selection(this@MainActivity) != GatewayBackend.COPILOT -> {
+                GatewayBackend.hasQoderAccount(this@MainActivity) -> {
                     val free = QoderModelCatalog.freeCount()
                     val src = if (QoderModelCatalog.hasDynamic()) "官方目录" else "内置清单"
                     "已加载 · $n 个模型（$src · $free 个免费）"
-                }
-                GatewayBackend.selection(this@MainActivity) == GatewayBackend.COPILOT -> {
-                    val src = if (CopilotModelCatalog.hasDynamic()) "Copilot 目录" else "还没拉到目录"
-                    "已加载 · $n 个模型（$src）"
                 }
                 else -> "已加载 · $n 个模型"
             }
@@ -1717,46 +1694,6 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------
     // 更多
     // ------------------------------------------------------------------
-
-    private fun morePage(): View = scroll {
-        // 外观入口放在最上面：这是"改长相"的地方，也顺带告诉用户当前在用什么风格。
-        addView(section("外观"))
-        addView(card {
-            addView(row {
-                addView(text("外观风格", FS_CARD_TITLE, true), weighted())
-                addView(chipInfo(AppStyle.current.label))
-            })
-            addView(caption("当前：${AppStyle.current.label} · ${AppStyle.mode.label}。" +
-                "可切换多套配色与形态，亮/暗可单独设置。"), top(8))
-            addView(action("打开外观风格", full = true) { openStylePage() }, top(12))
-        })
-        addView(section("关于"))
-        addView(card(tone = CardTone.SOFT) {
-            addView(text("应用说明", FS_CARD_TITLE, true))
-            addView(caption("本应用针对 Trae 当前协议的个人学习自用适配，不保证长期兼容，不代表官方支持。"), top(8))
-            addView(labelValue("版本", versionName), top(12))
-        })
-        addView(card(tone = CardTone.SOFT) {
-            addView(text("版权与免责声明", FS_CARD_TITLE, true))
-            addView(caption("仅供个人学习与研究使用。使用本项目与 Trae 账号存在风险，请自行评估并遵守相关服务条款。"), top(8))
-            // 与概览页同一份常量 + 同一个 [copyrightLine]，两处排版一致
-            addView(divider(), top(14))
-            addView(copyrightLine(AUTHOR_LABEL, AUTHOR_NAME), top(12))
-            addView(copyrightLine(CONTACT_LABEL, AUTHOR_EMAIL, monoValue = true,
-                onCopy = { copyEmail() }), top(6))
-        })
-        addView(section("保活"))
-        addView(card {
-            addView(row {
-                addView(text("后台保活设置", FS_CARD_TITLE, true), weighted())
-                val pending = KeepAlive.check(this@MainActivity).count { !it.ok }
-                addView(if (pending == 0) chipOk("已就绪") else chipWarn("$pending 项待开启"))
-            })
-            addView(caption("让网关在息屏、被系统回收后仍能存活。国产 ROM 会强杀前台服务，" +
-                "需要在系统里放开几项权限。"), top(8))
-            addView(action("打开保活设置", full = true) { openKeepAlive() }, top(12))
-        })
-    }
 
     // ------------------------------------------------------------------
     // 保活设置（二级页）
@@ -2199,20 +2136,6 @@ class MainActivity : Activity() {
      * "一张排版工整的小表"的区别。邮箱用等宽体：字母数字对齐、`@` 与 `.` 不会被
      * 比例字体挤在一起，读串的概率低一截。
      */
-    private fun copyrightLine(label: String, value: String, monoValue: Boolean = false, onCopy: (() -> Unit)? = null): View =
-        labelValue(label, value, monoValue) { v -> onCopy?.let { v.setOnClickListener { it() } } }
-
-    /** 概览页底部的版权卡：整页最后一个元素，用 SOFT 退到背景层，不与业务卡抢注意力。
-     *  详情小表只在「更多」页排（copyrightLine），这里一行 caption 带过，信息不重复。 */
-    private fun copyrightCard(): View = card(tone = CardTone.SOFT) {
-        addView(text("版权信息", FS_CARD_TITLE, true))
-        addView(caption("$AUTHOR_LABEL：$AUTHOR_NAME · $CONTACT_LABEL：$AUTHOR_EMAIL"), top(8))
-    }
-
-    /** 邮箱复制：手打 11 位数字容易错，点一下拿完整的比让用户自己抄靠谱。 */
-    private fun copyEmail() = copyToClipboard("authorEmail", AUTHOR_EMAIL, "已复制邮箱 $AUTHOR_EMAIL")
-
-    /** 复制到剪贴板 + 提示。原先三处各写一遍 getSystemService/setPrimaryClip，收口到这一处。 */
     private fun copyToClipboard(label: String, value: String, tip: String) {
         (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager)
             .setPrimaryClip(ClipData.newPlainText(label, value))
@@ -2343,153 +2266,6 @@ class MainActivity : Activity() {
      * 失败在静默模式下是**正常边界**（离线启动很常见）—— 磁盘缓存还在顶着，
      * 客户端拿到的仍是上次刷到的清单，所以只打日志，绝不能打扰用户。
      */
-    // ------------------------------------------------------------------
-    // GitHub Copilot（设备码登录 + 目录同步）
-    // ------------------------------------------------------------------
-
-    /**
-     * 设备码登录。
-     *
-     * 流程与官方客户端一致：`/login/device/code` 拿码 → 用户去
-     * `github.com/login/device` 输入 → 本地按上游给的 `interval` 轮询
-     * `/login/oauth/access_token` → 拿到 `ghu_` 令牌。
-     *
-     * ⚠️ 轮询间隔**必须**遵守上游给的 `interval`：快了会被 `slow_down`，
-     * 而且惩罚窗口是累计的（本次调试就因为 5 秒轮询被打回十几轮）。
-     */
-    private fun startCopilotLogin() {
-        toast("正在向 GitHub 申请设备码…")
-        thread(name = "copilot-device-flow") {
-            val flow = CopilotApi.startDeviceFlow()
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                if (flow == null) {
-                    toast("获取设备码失败：${CopilotApi.lastError ?: "未知原因"}")
-                    return@runOnUiThread
-                }
-                copyToClipboard("deviceCode", flow.userCode, "设备码已复制：${flow.userCode}")
-                val minutes = (flow.expiresIn / 60).coerceAtLeast(1)
-                val dlg = AlertDialog.Builder(this@MainActivity)
-                    .setTitle("GitHub Copilot 登录")
-                    .setMessage(
-                        "1. 打开 ${flow.verificationUri}\n" +
-                            "2. 输入设备码：${flow.userCode}（已复制）\n\n" +
-                            "有效期 $minutes 分钟。授权后这里会自动关闭，不用手动确认。",
-                    )
-                    .setPositiveButton("打开浏览器") { _, _ ->
-                        try {
-                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(flow.verificationUri)))
-                        } catch (_: Exception) {
-                            toast("没有可用浏览器，请手动打开 ${flow.verificationUri}")
-                        }
-                    }
-                    .setNegativeButton("取消", null)
-                    .setCancelable(true)
-                    .create()
-                dlg.show()
-
-                // 后台轮询：成功的唯一标志是拿到 access_token
-                thread(name = "copilot-poll") {
-                    val deadline = System.currentTimeMillis() + flow.expiresIn * 1000L
-                    var intervalMs = flow.interval * 1000L
-                    var token: String? = null
-                    var failMsg: String? = null
-                    while (System.currentTimeMillis() < deadline) {
-                        Thread.sleep(intervalMs)
-                        when (val r = CopilotApi.pollOnce(flow.deviceCode)) {
-                            is CopilotApi.PollResult.Token -> { token = r.accessToken; break }
-                            is CopilotApi.PollResult.Pending -> Unit
-                            // 被限流：退避后再问（移动网络 NAT 共用出口 IP，很常见）
-                            is CopilotApi.PollResult.SlowDown -> {
-                                intervalMs = CopilotApi.nextInterval(intervalMs)
-                            }
-                            is CopilotApi.PollResult.Failed -> { failMsg = r.error; break }
-                        }
-                    }
-                    runOnUiThread {
-                        if (isFinishing || isDestroyed) return@runOnUiThread
-                        try { dlg.dismiss() } catch (_: Exception) {}
-                        val t = token
-                        if (t == null) {
-                            toast(
-                                when {
-                                    failMsg != null -> "登录失败：$failMsg"
-                                    else -> "授权超时，请重新获取设备码"
-                                },
-                            )
-                            return@runOnUiThread
-                        }
-                        finishCopilotLogin(t)
-                    }
-                }
-            }
-        }
-    }
-
-    /** 拿到 OAuth 令牌后的收尾：换 Copilot 令牌 → 取用户名/套餐 → 落盘 → 刷目录。 */
-    private fun finishCopilotLogin(oauthToken: String) {
-        thread(name = "copilot-finish-login") {
-            val pair = CopilotApi.exchangeCopilotToken(oauthToken)
-            val info = CopilotApi.fetchUser(oauthToken)
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                if (pair == null) {
-                    toast("登录成功但换 Copilot 令牌失败：${CopilotApi.lastError ?: "未知原因"}")
-                    return@runOnUiThread
-                }
-                CopilotAuthStore.save(
-                    this@MainActivity,
-                    CopilotAuthStore.Cred(
-                        oauthToken = oauthToken,
-                        login = info?.first.orEmpty(),
-                        sku = info?.second.orEmpty(),
-                        plan = info?.third.orEmpty(),
-                        copilotToken = pair.first,
-                        copilotExpiresAt = pair.second,
-                    ),
-                )
-                toast("GitHub Copilot 已登录：${info?.first ?: ""}".trim())
-                render(currentPage)
-                syncCopilotModels(quiet = false)
-            }
-        }
-    }
-
-    /**
-     * 同步 Copilot 模型目录。
-     *
-     * 与 Qoder 的区别：**没有内置兜底清单**。Copilot 的模型随账号套餐变化，
-     * 编一份内置表只会给出"这个账号根本没有的模型"，所以拉不到就保持上次的结果。
-     */
-    private fun syncCopilotModels(quiet: Boolean = false) {
-        val cred = CopilotAuthStore.load(this)
-        if (cred == null || !cred.chatReady) {
-            if (!quiet) toast("未登录 Copilot")
-            return
-        }
-        if (!quiet) toast("正在拉取 Copilot 模型目录…")
-        thread(name = "copilot-sync-models") {
-            val token = CopilotApi.validCopilotToken(this@MainActivity, cred)
-            val raw = token?.let { CopilotApi.fetchModels(it) }
-            val list = raw?.let { CopilotModelCatalog.parse(it) } ?: emptyList()
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                if (list.isEmpty()) {
-                    if (!quiet) {
-                        toast(
-                            "拉取 Copilot 目录失败：" + (CopilotApi.lastError ?: "上游没返回模型")
-                                .take(80),
-                        )
-                    }
-                    return@runOnUiThread
-                }
-                CopilotModelCatalog.setDynamic(list)
-                if (!quiet) toast("Copilot 模型 ${list.size} 个")
-                render(currentPage)
-            }
-        }
-    }
-
     private fun refreshModels(quiet: Boolean = false) {
         // Qoder 后端：拉**官方目录**（含真实倍率与内置清单里没有的免费模型）。
         // 拉不到就继续用内置清单 —— 绝不因为一次网络失败把模型列表清空。
@@ -2497,16 +2273,8 @@ class MainActivity : Activity() {
             syncQoderCatalog(quiet)
             return
         }
-        // Copilot 后端：目录完全来自上游（随账号套餐变化），拉不到就保留上次的
-        if (GatewayBackend.selection(this) == GatewayBackend.COPILOT) {
-            syncCopilotModels(quiet)
-            return
-        }
         // 并集模式：Qoder 目录也顺手刷一次（异步，失败不影响下面的 Trae 刷新）
-        if (GatewayBackend.isMixed(this)) {
-            syncQoderCatalog(quiet = true)
-            if (GatewayBackend.hasCopilotAccount(this)) syncCopilotModels(quiet = true)
-        }
+        if (GatewayBackend.isMixed(this)) syncQoderCatalog(quiet = true)
         val cred = TraeAuthStore.load(this)
         if (cred == null || cred.accessToken.isBlank()) {
             if (!quiet) toast("未登录 Trae，请先登录")
@@ -2835,7 +2603,7 @@ class MainActivity : Activity() {
     /**
      * 键值行：标签列只给最小宽度（不再是死 96dp，长标签能撑开），值可长按复制。
      *
-     * [monoValue] 给邮箱这类"标识符型"的值用（见 [copyrightLine]）；
+     * [monoValue] 给邮箱这类"标识符型"的值用；
      * [decorate] 让调用方在**不重写这个布局**的前提下附加行为（如整行可点复制）——
      * 比再写一个几乎一样、只多一行 setOnClickListener 的行构建器省事且不会走样。
      */
