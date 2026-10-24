@@ -252,7 +252,7 @@ object QoderCheckin {
     fun statusLabel(r: PerAccount): String = when (r.status) {
         "ok" -> "✓ 领取成功 +${r.amount}"
         "already" -> r.message.ifBlank { "今日已领取" }
-        "unsupported" -> "国际版暂不支持自动领取"
+        "unsupported" -> "该区域/活动暂不可领（见消息）"
         else -> "失败：${r.message}"
     }
 

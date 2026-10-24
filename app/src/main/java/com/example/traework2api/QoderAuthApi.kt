@@ -133,7 +133,7 @@ object QoderAuthApi {
     fun fetchCredits(jt: String, mode: String): QCredits? {
         if (jt.isBlank()) return null
         return try {
-            var root = JSONObject(getForCampaigns(openApiBase(mode) + EP_USAGE, jt, null))
+            var root = JSONObject(getForCampaigns(openApiBase(mode) + EP_USAGE, jt))
             // 部分返回把内容裹在 data 下；探测不到已知键时再解一层。
             if (!root.has("userQuota") && !root.has("personalQuota") &&
                 !root.has("isQuotaExceeded") && root.has("data")
@@ -223,20 +223,19 @@ object QoderAuthApi {
                 actionType.equals("CLAIM_BENEFIT", true)
     }
 
-    /** 领取结果。status ∈ ok / already / none / unsupported / fail。 */
+    /** 领取结果。status ∈ ok / already / fail（国际与国内同一套判定，不再区分 unsupported）。 */
     data class QClaimResult(val status: String, val amount: Long, val message: String) {
         val ok: Boolean get() = status == "ok"
     }
 
-    /** GET 带 Bearer，可选携带设备标识头（国际版 campaigns 需 Cosy-MachineToken/MachineType）。 */
-    private fun getForCampaigns(url: String, bearer: String, umid: String?): String {
+    /** GET 带 Bearer。刻意不带 Cosy-Machine* 头：伪造派生指纹会被 campaigns 服务静默过滤（见 Qoder-2API-Go），干净请求反而能领通用活动。 */
+    private fun getForCampaigns(url: String, bearer: String): String {
         val req = Request.Builder().url(url).get()
             .header("Authorization", "Bearer $bearer")
             .header("Accept", JSON)
             .header("User-Agent", "traework2api")
             .header("Cosy-Version", "1.0.1")
             .header("Cosy-ClientType", "10")
-            .apply { if (umid != null) header("Cosy-MachineToken", umid).header("Cosy-MachineType", "2") }
             .build()
         client.newCall(req).execute().use { r ->
             val text = r.body?.string().orEmpty()
@@ -246,7 +245,7 @@ object QoderAuthApi {
     }
 
     /** POST 带 Bearer + JSON body（claim 用，body 传空对象）。 */
-    private fun postBearer(url: String, bearer: String, body: JSONObject, umid: String?): String {
+    private fun postBearer(url: String, bearer: String, body: JSONObject): String {
         val req = Request.Builder().url(url)
             .post(body.toString().toRequestBody(JSON.toMediaType()))
             .header("Authorization", "Bearer $bearer")
@@ -255,7 +254,6 @@ object QoderAuthApi {
             .header("User-Agent", "traework2api")
             .header("Cosy-Version", "1.0.1")
             .header("Cosy-ClientType", "10")
-            .apply { if (umid != null) header("Cosy-MachineToken", umid).header("Cosy-MachineType", "2") }
             .build()
         client.newCall(req).execute().use { r ->
             val text = r.body?.string().orEmpty()
@@ -266,19 +264,19 @@ object QoderAuthApi {
 
     /**
      * 拉取活动列表（可领的在里面）。解析见 [parseCampaigns]。
-     * 国际版 campaigns 需原生 Cosy-MachineToken（本 App 无法产出，见 [claimDailyForCred] 的前置判断），
-     * 故这里不再伪造设备标识头——假 token 无益且可能被判定篡改。
+     * 国际/国内同走干净请求（不带 Cosy-Machine* 头）：伪指纹会让服务端静默隐藏「每天领」活动，
+     * 无指纹则通用活动保持可见；「每天领 100 Credits」这类仅原生桌面端身份下发的活动会正常缺席。
      */
     private fun fetchCampaigns(jt: String, mode: String): List<QCampaign> {
         val url = openApiBase(mode) + EP_CAMPAIGNS + "?forceRefresh=true"
-        val text = getForCampaigns(url, jt, null)
+        val text = getForCampaigns(url, jt)
         return parseCampaigns(JSONObject(text))
     }
 
     /** 领一条活动。body 固定 {}（幂等）。返回本次入账额度（replayed 时为 0）。 */
     private fun claimOne(jt: String, mode: String, campaignId: String): Pair<Boolean, Long> {
         val url = openApiBase(mode) + EP_CAMPAIGNS + "/" + campaignId + "/claim"
-        val text = postBearer(url, jt, JSONObject(), null)
+        val text = postBearer(url, jt, JSONObject())
         return parseClaim(JSONObject(text))
     }
 
@@ -321,11 +319,8 @@ object QoderAuthApi {
 
     /** 领取编排：取有效 jt → 列活动 → 领 CLAIMABLE 的 → 汇总。失败不抛（一人失败不拖垮整批）。 */
     private fun claimDailyForCred(context: Context, cred: QoderAuthStore.QCred): QClaimResult {
-        // 国际版每日领取由服务端按「原生设备标识」下发（Cosy-MachineToken/MachineType），只有 Qoder
-        // 桌面/CLI 能产出，Android 端无法伪造 → 缺它时服务端返回 200 但隐藏该活动。故直接给准确说明。
-        if (cred.mode == MODE_GLOBAL)
-            return QClaimResult("unsupported", 0,
-                "国际版「每天领 Credits」需 Qoder 桌面端的原生设备标识，本 App 无法提供。请在 Qoder 桌面端「用量面板→礼物图标」领取，或改用「国内版」账号在本 App 内领取。")
+        // 国际/国内同走干净链路（不带 Cosy-Machine* 头）。桌面端专属「每天领 100 Credits」
+        // 活动在没有原生指纹时服务端会正常缺席，但其它通用活动仍可领；无需再对国际版硬挡 unsupported。
         val jt = validJobTokenFor(context, cred, skewMillis = 60_000L)
         if (jt.isNullOrBlank()) return QClaimResult("fail", 0, "没有有效 token，请重新粘贴 PAT 登录")
         val campaigns = try {

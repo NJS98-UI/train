@@ -952,9 +952,9 @@ class MainActivity : Activity() {
             val total = ok.sumOf { it.second.amount }
             return "${ok.size}/${items.size} 个账号领取成功，共 +$total Credits"
         }
-        // 全无可领：若含国际版不支持，优先把原因说清楚。
-        val unsup = items.firstOrNull { it.second.status == "unsupported" }
-        return unsup?.second?.message ?: "无可领额度（已领或不符）· 共 ${items.size} 个账号"
+        // 全无可领：如有明确失败原因，优先说清楚；否则给统一的「无可领」结论。
+        val failed = items.firstOrNull { it.second.status == "fail" }
+        return failed?.second?.message ?: "无可领额度（已领或不符）· 共 ${items.size} 个账号"
     }
 
     /** 定时时刻在常用档位间循环（免输入框，够用即可）。 */
