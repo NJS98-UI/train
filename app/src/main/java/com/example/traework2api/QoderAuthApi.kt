@@ -377,17 +377,17 @@ object QoderAuthApi {
         }
 
         // 活动解析：只有 CLAIMABLE ∧ CLAIM_BENEFIT 才算可领（判松了会白发 claim，判严了漏领）。
+        // 注意 parseCampaigns 会**丢弃空 id** 的条目，故 4 条输入 → 3 条有效解析（顺序：act-1, act-2, act-4）。
         val camps = parseCampaigns(JSONObject("""{"campaigns":[
             {"campaignId":"act-1","claimStatus":"CLAIMABLE","actionType":"CLAIM_BENEFIT","benefit":{"kind":"CREDITS","amount":100}},
             {"id":"act-2","claimStatus":"CLAIMED","actionType":"CLAIM_BENEFIT","benefit":{"kind":"CREDITS","amount":100}},
             {"campaignId":"","claimStatus":"CLAIMABLE","actionType":"CLAIM_BENEFIT"},
             {"campaignId":"act-4","claimStatus":"CLAIMABLE","actionType":"OTHER"}
         ]}"""))
-        check(camps.size == 4) { "自检失败：应解析 4 条活动（含空 id）" }
-        check(camps[0].claimable) { "自检失败：CLAIMABLE+CLAIM_BENEFIT 应判可领" }
-        check(!camps[1].claimable) { "自检失败：已领(CLAIMED)不应判可领" }
-        check(!camps[2].claimable) { "自检失败：空 id 不应判可领" }
-        check(!camps[3].claimable) { "自检失败：非 CLAIM_BENEFIT 不应判可领" }
+        check(camps.size == 3) { "自检失败：空 id 应被丢弃，4 条输入应解析出 3 条" }
+        check(camps[0].id == "act-1" && camps[0].claimable) { "自检失败：CLAIMABLE+CLAIM_BENEFIT 应判可领" }
+        check(camps[1].id == "act-2" && !camps[1].claimable) { "自检失败：已领(CLAIMED)不应判可领" }
+        check(camps[2].id == "act-4" && !camps[2].claimable) { "自检失败：非 CLAIM_BENEFIT 不应判可领" }
 
         // claim 解析：replayed=true（今天已领过）不算新领、不计额度，避免重复计数。
         check(parseClaim(JSONObject("""{"status":"CLAIMED","replayed":false,"benefit":{"kind":"CREDITS","amount":100}}""")) == (true to 100L)) {
