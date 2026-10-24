@@ -538,9 +538,14 @@ object QoderAuthApi {
             // 该活动只下发给带原生设备标识（Cosy-MachineToken，阿里 umid 原生 SDK 产出、
             // 仅 Qoder 桌面端/CLI 能生成）的请求；手机端伪造不出来，服务端会 200 但把活动隐藏。
             // 所以这里必须如实说清楚，不能写成"可能已领" —— 那会让人以为明天再来就有了。
-            val why = if (campaigns.isNotEmpty()) {
-                // 实测：很多账号只下发 VIEW_DETAILS（营销横幅），这类活动不发 Credits，
-                // 领了也只是一条 CLAIMED 记录。如实说，别让人以为签到失败了。
+            // 实测（2026-10-24，两个真实国际版账号）：活动全是 VIEW_DETAILS 营销横幅，
+            // benefit 为 null，领了只写一条 CLAIMED 记录、额度不动。文案必须把
+            // "已领取" 和 "领到了积分" 分开说，否则用户会以为签到坏了。
+            val allClaimed = campaigns.isNotEmpty() &&
+                campaigns.all { it.claimStatus.equals("CLAIMED", true) }
+            val why = if (allClaimed) {
+                "已领取 ${campaigns.size} 条活动（均为查看类，不发 Credits）"
+            } else if (campaigns.isNotEmpty()) {
                 "有 ${campaigns.size} 条活动但都是查看类（不发 Credits），本账号暂无每日领取"
             } else if (cred.mode == MODE_GLOBAL) {
                 "国际版无可见活动（已带 Cosy-ClientType:10），该账号可能没有活动资格"

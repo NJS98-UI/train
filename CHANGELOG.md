@@ -8,6 +8,21 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.3] - 2026-10-17
+
+### Fixed
+- Qoder 领取结果文案：活动**已领取**时不再说「无可见活动」，改成
+  「已领取 N 条活动（均为查看类，不发 Credits）」——实测两个国际版账号的活动都是
+  `VIEW_DETAILS`、`benefit=null`，领了只写 CLAIMED 记录，额度不动。
+
+### Verified (真机账号实测，非推测)
+- 额度查询：真正余额在 **`addOnQuota`**（加购/赠送额度），`userQuota` 恒为 0。
+  本 App 的 `fetchCredits` 已把 `userQuota + addOnQuota + 组织额度` 全部累加，
+  显示的是真实可用额度（示例账号：`addOnQuota.total=300, used=110, remaining=188`）。
+- 国际版没有独立签到接口：`/sash/api/v1/me/checkin`、`/me/daily-checkin`、`/me/daily`、
+  `/api/v1/me/checkin`、`/algo/api/v1/checkin` 全部 404，只有 `/sash/api/v1/me/campaigns`。
+- 国内 host 不认国际 PAT（exchange 400）。
+
 ## [0.7.2] - 2026-10-17
 
 ### Changed
