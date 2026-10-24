@@ -1322,12 +1322,12 @@ class MainActivity : Activity() {
         if (QoderAuthStore.list(this).isEmpty()) { toast("没有 Qoder 账号"); return }
         toast("诊断中…")
         thread(name = "qoder-diagnose") {
-            val text = runCatching { QoderAuthApi.diagnose(this) }
+            val dump = runCatching { QoderAuthApi.diagnose(this) }
                 .getOrElse { "诊断异常：${it.javaClass.simpleName}: ${it.message}" }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 val box = android.widget.TextView(this).apply {
-                    text = text
+                    setText(dump)
                     typeface = android.graphics.Typeface.MONOSPACE
                     textSize = 10f
                     setTextIsSelectable(true)
@@ -1343,7 +1343,7 @@ class MainActivity : Activity() {
                 dlg.setOnShowListener {
                     dlg.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                         val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        cm.setPrimaryClip(android.content.ClipData.newPlainText("diagnose", text))
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("diagnose", dump))
                         toast("已复制")
                     }
                 }
