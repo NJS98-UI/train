@@ -154,6 +154,12 @@ class MainActivity : Activity() {
     /** 积分刷新进行中：数值位显示「…」，否则用户点了「刷新」会觉得没反应。 */
     private var quotaLoading = false
 
+    /** 账号选择弹窗里每行固定高度（dp）。 */
+    private val PICKER_ROW_H = 56
+
+    /** 账号选择弹窗最多露出几行，超出滚动。 */
+    private val PICKER_VISIBLE_ROWS = 5
+
     /** 签到状态查不到且原因是鉴权失败（token 被判废）。 */
     private var checkinAuthFailed = false
     /** 待写入 SAF 的备份 JSON（导出账号点「保存」后暂存，onActivityResult 拿到 Uri 再落盘）。 */
@@ -829,13 +835,18 @@ class MainActivity : Activity() {
             panel.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(6), dp(14), dp(6), dp(14))
+                setPadding(dp(6), 0, dp(6), 0)
+                // 每行**固定高度**：账号多寡只改变滚动，不改变行高
+                layoutParams = LinearLayout.LayoutParams(-1, dp(PICKER_ROW_H))
                 isClickable = true
                 setOnClickListener {
                     pickerDialogRef?.dismiss()
                     if (m.uid != active) switchAccount(m.uid)
                 }
-                addView(text(m.nickname.ifBlank { m.uid }, FS_VALUE, true), weighted())
+                addView(text(m.nickname.ifBlank { m.uid }, FS_VALUE, true).apply {
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }, weighted())
                 addView(caption(regionLabel(m.region)), lp(-2, -2, start = 8))
                 addView(caption(traeCreditText(m.uid)), lp(-2, -2, start = 10))
                 if (m.uid == active) {
@@ -861,7 +872,7 @@ class MainActivity : Activity() {
             })
             panel.addView(divider())
         }
-        showPickerDialog("选择 Trae 账号", panel)
+        showPickerDialog("选择 Trae 账号", panel, metas.size)
     }
 
     /** Qoder 账号选择弹窗：同样的排版与规则。 */
@@ -874,13 +885,17 @@ class MainActivity : Activity() {
             panel.addView(LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(6), dp(14), dp(6), dp(14))
+                setPadding(dp(6), 0, dp(6), 0)
+                layoutParams = LinearLayout.LayoutParams(-1, dp(PICKER_ROW_H))
                 isClickable = true
                 setOnClickListener {
                     pickerDialogRef?.dismiss()
                     if (m.uid != active) switchQoderAccount(m.uid)
                 }
-                addView(text(m.name.ifBlank { m.uid }, FS_VALUE, true), weighted())
+                addView(text(m.name.ifBlank { m.uid }, FS_VALUE, true).apply {
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }, weighted())
                 addView(caption(if (m.mode == QoderAuthApi.MODE_GLOBAL) "国际版" else "国内版"), lp(-2, -2, start = 8))
                 addView(caption(qoderCreditText(m.uid)), lp(-2, -2, start = 10))
                 if (m.uid == active) {
@@ -906,19 +921,35 @@ class MainActivity : Activity() {
             })
             panel.addView(divider())
         }
-        showPickerDialog("选择 Qoder 账号", panel)
+        showPickerDialog("选择 Qoder 账号", panel, metas.size)
     }
 
     /** 统一样式的列表弹窗（只有关闭键；行自己处理点击）。 */
     private var pickerDialogRef: AlertDialog? = null
 
-    private fun showPickerDialog(title: String, panel: View) {
+    /**
+     * 账号选择弹窗的壳：**固定大小**，最多露出 [PICKER_VISIBLE_ROWS] 行，超出上下滑动。
+     *
+     * 为什么固定：账号一多，弹窗会被撑到整屏甚至超出屏幕，底部「关闭」按钮跑出可见区，
+     * 用户就没法关掉它。固定高度后，"几个账号"只影响滚动条，不影响弹窗尺寸。
+     */
+    private fun showPickerDialog(title: String, panel: View, rows: Int) {
+        val visible = rows.coerceIn(1, PICKER_VISIBLE_ROWS)
+        // 行高 * 行数 + 分隔线（行间 1dp）+ 2dp 余量，避免最后一行被裁
+        val h = dp(visible * PICKER_ROW_H + (visible - 1) + 2)
+        val scroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = true
+            addView(panel, android.widget.FrameLayout.LayoutParams(-1, -2))
+        }
+        val holder = android.widget.FrameLayout(this).apply {
+            addView(scroll, android.widget.FrameLayout.LayoutParams(-1, h))
+        }
         val dlg = confirmDialog(
             title = title,
             message = "",
             okText = "关闭",
             cancelText = null,
-            content = panel,
+            content = holder,
         ) { }
         pickerDialogRef = dlg
     }
@@ -1062,7 +1093,7 @@ class MainActivity : Activity() {
     private fun checkinStatusText(): String {
         val parts = ArrayList<String>()
         accountCheckin?.let {
-            parts.add("Trae：" + if (it.checkedIn) "已签到" else if (!it.enable) "未开放" else "可签到")
+            parts.add("Trae：" + if (it.checkedIn) "已签到" else if (!it.enable) "无签到权限" else "可签到")
         }
         val last = QoderCheckin.lastResults(this)
         if (last != null) {
@@ -1253,8 +1284,10 @@ class MainActivity : Activity() {
     private fun qoderRemainingLabel(): String {
         val uid = QoderAuthStore.activeUid(this)
         if (uid != null) {
-            val v = AccountCredits.current().qoder(uid)?.remaining
-            if (v != null) return AccountCredits.format(v)
+            // 走同一个 label()：卡片和账号弹窗必须显示**同一个**读数与同一种失败原因，
+            // 否则会出现"卡片 600、弹窗 —（需重新登录）"这种自相矛盾。
+            val item = AccountCredits.current().qoder(uid)
+            if (item != null) return AccountCredits.label(item)
         }
         return qoderRemaining?.let { "%.1f".format(it) } ?: "—"
     }
@@ -1634,11 +1667,13 @@ class MainActivity : Activity() {
      * 登录状态由调用方传入（`accountPage()` 已经读过了），这里**不重复解密** KeyStore。
      */
     private fun checkinActionLabel(loggedIn: Boolean): String = when {
+        // 一套词，四处（卡片/弹窗/一键签到结果）都用它，别再各写各的
         checkinBusy -> "签到中…"
-        accountCheckin == null && checkinAuthFailed -> "token 失效"
-        accountCheckin == null -> if (loggedIn) "加载中…" else "未登录"
-        accountCheckin?.checkedIn == true -> "今日已签到"
-        accountCheckin?.enable == false -> "未开放"
+        !loggedIn -> "未登录"
+        accountCheckin == null && checkinAuthFailed -> "需重新登录"
+        accountCheckin == null -> "加载中…"
+        accountCheckin?.checkedIn == true -> "已签到"
+        accountCheckin?.enable == false -> "无签到权限"
         else -> "签到"
     }
 
@@ -1693,7 +1728,7 @@ class MainActivity : Activity() {
      * `accountCheckin == null` 返回 null 让调用方显示「—」（没数据就是没数据，不编）。
      */
     private fun checkinRewardLabel(): String? = accountCheckin?.let {
-        if (!it.enable) "该账号未开放签到" else "每日可领 +${it.credits}"
+        if (!it.enable) "该账号无签到权限" else "每日可领 +${it.credits}"
     }
 
     /** 积分数值位：刷新中显示「…」，没拿到显示「—」。 */
@@ -1718,7 +1753,7 @@ class MainActivity : Activity() {
     private fun tokenRenewLabel(expiresAt: Long): String {
         // 只看到期时间会说谎：token 可能"没过期但已被服务端拒绝"。
         // 有实测证据（查额度/签到撞 401/1001）时以证据为准。
-        if (checkinAuthFailed) return "已被服务端拒绝 · 需重新登录"
+        if (checkinAuthFailed) return "需重新登录"
         if (expiresAt <= 0L) return "未知（无到期信息）"
         val remainSec = expiresAt - System.currentTimeMillis() / 1000
         return if (remainSec <= 0) "已过期 · 需重新登录"
@@ -2241,7 +2276,7 @@ class MainActivity : Activity() {
         // 区域以账号为准并持久化（复用同一处逻辑，别在这里再抄一遍）
         TraeAuthStore.syncRegionToActiveAccount(this)
         // 切号 = 换了身份：上一个账号的积分/签到状态必须作废，
-        // 否则新账号会继承"今日已签到"（这是误报的另一个入口）
+        // 否则新账号会继承"已签到"（这是误报的另一个入口）
         invalidateAccountQuota()
         Toast.makeText(this, "已切换到 ${meta.nickname.ifBlank { meta.uid }}", Toast.LENGTH_SHORT).show()
         loadAndRefreshToken()
@@ -2428,8 +2463,8 @@ class MainActivity : Activity() {
         if (cred == null || cred.accessToken.isBlank()) { toast("未登录 Trae，请先登录"); return }
         if (checkinBusy) return
         val before = accountCheckin
-        if (before?.checkedIn == true) { toast("今日已签到"); return }
-        if (before?.enable == false) { toast("该账号未开放签到"); return }
+        if (before?.checkedIn == true) { toast("已签到"); return }
+        if (before?.enable == false) { toast("该账号无签到权限"); return }
         checkinBusy = true
         quotaApply?.invoke()          // 按钮立刻变「签到中…」
         thread(name = "trae-checkin") {
@@ -2460,7 +2495,7 @@ class MainActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (tail == null) {
                     accountCheckin = known ?: accountCheckin
-                    toast(if (known?.enable == false) "该账号未开放签到" else "今日已签到")
+                    toast(if (known?.enable == false) "该账号无签到权限" else "已签到")
                     quotaApply?.invoke()
                     return@runOnUiThread
                 }
@@ -2470,7 +2505,7 @@ class MainActivity : Activity() {
                 toast(
                     when {
                         TraeUpstream.checkinSucceeded(known, after, code) -> "签到成功"
-                        after?.checkedIn == true -> "今日已签到"
+                        after?.checkedIn == true -> "已签到"
                         // 别把"token 被拒"说成"网络不通"：两种原因，两个方向的处置
                         code == null && TraeUpstream.lastAuthFailed ->
                             "签到失败：token 已被服务端拒绝，请重新登录该账号"

@@ -233,7 +233,7 @@ object AccountCredits {
             val item = try {
                 if (!m.region.isSupported) {
                     // 国际服签到/积分协议未实测：不硬打上游，明确标注而不是显示 0
-                    Item(TRAE, m.uid, old?.remaining, false, "国际服不查额度", old?.at ?: 0L)
+                    Item(TRAE, m.uid, old?.remaining, false, "国际服不支持", old?.at ?: 0L)
                 } else {
                     val cred = TraeAuthStore.loadByUid(ctx, m.uid)
                     if (cred == null) {
@@ -244,7 +244,7 @@ object AccountCredits {
                             TraeAuthApi.restartWithValidTokenFor(ctx, cred, skewSec = 3600L)
                         } ?: cred.accessToken.takeIf { it.isNotBlank() }
                         if (tok.isNullOrBlank()) {
-                            Item(TRAE, m.uid, old?.remaining, false, "token 不可用", old?.at ?: 0L)
+                            Item(TRAE, m.uid, old?.remaining, false, "需重新登录", old?.at ?: 0L)
                         } else {
                             var bal = retryFetch { TraeUpstream.fetchUsage(tok, cred.uid, m.region) }
                             if (bal == null) {
@@ -257,7 +257,7 @@ object AccountCredits {
                                 }
                             }
                             if (bal == null) {
-                                val why = if (TraeUpstream.lastAuthFailed) "token 失效" else "查询失败"
+                                val why = if (TraeUpstream.lastAuthFailed) "需重新登录" else "查询失败"
                                 Item(TRAE, m.uid, old?.remaining, false, why, old?.at ?: 0L)
                             } else {
                                 Item(TRAE, m.uid, bal.toDouble(), bal <= 0L, null, now)
@@ -285,7 +285,7 @@ object AccountCredits {
                     val jt = QoderAuthApi.validJobTokenFor(ctx, cred, 60L * 60L * 1000L)
                         ?: cred.jobToken.takeIf { it.isNotBlank() }
                     if (jt.isNullOrBlank()) {
-                        Item(QODER, m.uid, old?.remaining, false, "token 不可用", old?.at ?: 0L)
+                        Item(QODER, m.uid, old?.remaining, false, "需重新登录", old?.at ?: 0L)
                     } else {
                         val c = retryFetch { QoderAuthApi.fetchCredits(jt, cred.mode) }
                         if (c == null) {
@@ -323,13 +323,13 @@ object AccountCredits {
     /** 单个账号的展示文本（含失败标注）。 */
     fun label(item: Item?): String {
         if (item == null) return "—"
-        val v = format(item.remaining)
-        return when {
-            // 带旧值时把"这是上次的值"写清楚，否则「600（token 失效）」读起来像自相矛盾
-            item.error != null && item.known -> "$v（上次值 · ${item.error}）"
-            item.error != null -> "—（${item.error}）"
-            else -> v
-        }
+        // 失败一律显示「—（原因）」。
+        //
+        // 曾经试过"失败时保留上次的数字 + 括号标原因"，结果屏幕上出现
+        // 「600（token 失效）」这种自相矛盾的读数 —— 用户不知道 600 是现在有还是以前有。
+        // 数字只有一种含义：**此刻查到的值**。查不到就是查不到，原因写在括号里。
+        item.error?.let { return "—（$it）" }
+        return format(item.remaining)
     }
 
     /**
@@ -383,8 +383,9 @@ object AccountCredits {
         check(label(Item(TRAE, "x", null, false, "查询失败", 1L)) == "—（查询失败）") {
             "自检失败：从无数据时失败应显示 —（原因）"
         }
-        check(label(Item(TRAE, "x", 9.0, false, "查询失败", 1L)) == "9（上次值 · 查询失败）") {
-            "自检失败：有旧数据时失败应保留旧值并标原因"
+        // 失败时**不许**把旧数字挂在屏幕上（「600（token 失效）」自相矛盾）
+        check(label(Item(TRAE, "x", 9.0, false, "查询失败", 1L)) == "—（查询失败）") {
+            "自检失败：失败时应只显示 —（原因），不许带旧值"
         }
     }
 }

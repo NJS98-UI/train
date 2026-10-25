@@ -233,7 +233,7 @@ object BatchCheckin {
             val before = TraeUpstream.fetchCheckinHealing(ctx, cred)
                 ?: return PerAccount(meta.uid, name, "fail", -1, "拉取签到状态失败（网络或上游异常）")
             if (before.checkedIn) return PerAccount(meta.uid, name, "already", before.credits, "")
-            if (!before.enable) return PerAccount(meta.uid, name, "disabled", -1, "该账号未开放签到")
+            if (!before.enable) return PerAccount(meta.uid, name, "disabled", -1, "该账号无签到权限")
             val code = TraeUpstream.claimCheckinHealing(ctx, cred)
             val after = TraeUpstream.fetchCheckinHealing(ctx, cred)
             when {
@@ -368,7 +368,7 @@ object BatchCheckin {
     /** 结果状态 → 人话（账号页每行用）。 */
     fun statusLabel(r: PerAccount): String = when (r.status) {
         "ok" -> "✓ 签到成功 +${r.credits}"
-        "already" -> "今日已签到"
+        "already" -> "已签到"
         "disabled" -> "未开放签到"
         "unsupported" -> "该区域未支持签到"
         else -> "失败：${r.message}"
