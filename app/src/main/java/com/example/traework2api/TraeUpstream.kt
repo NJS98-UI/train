@@ -404,6 +404,69 @@ object TraeUpstream {
     }
 
     /**
+     * 原样打一次，把 **HTTP 状态码 + 响应体** 交回来，用于现场诊断（不做任何解释）。
+     *
+     * 与 [ug] 的区别：`ug` 把"非 2xx"折叠成 null，诊断时恰恰需要看见那个码和那段 body。
+     * 返回 `(0, 异常名)` 表示连请求都没送出去（DNS/超时/连接被重置）。
+     */
+    private fun ugRaw(token: String, url: String, uid: String, region: TraeRegion): Pair<Int, String> {
+        val b = Request.Builder().url(url)
+            .post("{}".toRequestBody("application/json".toMediaType()))
+            .header("Authorization", "Cloud-IDE-JWT $token")
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "VSCode 1.107.1 (TRAE SOLO CN)")
+            .header("X-Market-Client-Id", "VSCode 1.107.1")
+            .header("X-Market-User-Id", marketUserIdFor(uid))
+            .header("X-Device-Id", deviceIdFor(uid))
+            .header("Vscode-Sessionid", sessionIdFor(uid))
+            .header("Package-Type", "stable_cn")
+            .header("X-User-Region", region.userRegionHeader.ifBlank { "CN" })
+        return try {
+            client.newCall(b.build()).execute().use { r -> r.code to (r.body?.string().orEmpty()) }
+        } catch (e: Exception) { 0 to (e.javaClass.simpleName + ": " + (e.message ?: "")) }
+    }
+
+    /** 单账号诊断：把 token 形状、有效期、两个额度接口的**原始**返回摊开给人看。 */
+    fun diagnose(cred: TraeAuthStore.Cred): String {
+        val reg = cred.region
+        val now = System.currentTimeMillis() / 1000
+        val sb = StringBuilder()
+        sb.append("uid=").append(cred.uid).append("  nick=").append(cred.nickname).append('\n')
+        sb.append("region=").append(reg.id).append("  supported=").append(reg.isSupported)
+            .append("  canQueryQuota=").append(reg.canQueryQuota).append('\n')
+        sb.append("access=").append(cred.accessToken.length).append("字  refresh=")
+            .append(cred.refreshToken.length).append("字\n")
+        sb.append("expiresAt=").append(cred.expiresAt)
+        if (cred.expiresAt > 0) {
+            sb.append(" (").append(
+                java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US)
+                    .format(java.util.Date(cred.expiresAt * 1000))
+            ).append(") 剩余=").append((cred.expiresAt - now) / 60).append("分钟")
+        } else sb.append(" (未知)")
+        sb.append('\n')
+        for ((name, path) in listOf("status" to EP_CHECKIN_STATUS, "usage" to EP_ENT_USAGE)) {
+            val (code, body) = ugRaw(cred.accessToken, reg.ugHost + path, cred.uid, reg)
+            sb.append("\n[").append(name).append("] HTTP ").append(code)
+                .append("  authFailed=").append(lastAuthFailed).append('\n')
+            sb.append(body.take(400)).append('\n')
+        }
+        return sb.toString()
+    }
+
+    /**
+     * 带自愈的签到：失败且是鉴权问题 → 强制续一次 token 再试一次。
+     *
+     * 返回 null 时调用方**必须**用 [lastAuthFailed] 区分文案：
+     * "token 失效" 和 "网络不通" 是两件事，报错报错了会把人引向错误的方向。
+     */
+    fun claimCheckinHealing(ctx: android.content.Context, cred: TraeAuthStore.Cred): Int? {
+        claimCheckin(cred.accessToken, cred.uid, cred.region)?.let { return it }
+        if (!lastAuthFailed) return null
+        val t2 = Gateway.locked { TraeAuthApi.forceRefreshTokenFor(ctx, cred) } ?: return null
+        return claimCheckin(t2, cred.uid, cred.region)
+    }
+
+    /**
      * 带自愈的状态查询：失败且是鉴权问题 → 强制续一次 token 再试。
      *
      * 现场症状是"今天签到成功了，过一会儿突然变成没有签到权限、积分也查不到" ——

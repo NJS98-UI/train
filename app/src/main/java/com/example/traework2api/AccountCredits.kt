@@ -325,7 +325,8 @@ object AccountCredits {
         if (item == null) return "—"
         val v = format(item.remaining)
         return when {
-            item.error != null && item.known -> "$v（${item.error}）"
+            // 带旧值时把"这是上次的值"写清楚，否则「600（token 失效）」读起来像自相矛盾
+            item.error != null && item.known -> "$v（上次值 · ${item.error}）"
             item.error != null -> "—（${item.error}）"
             else -> v
         }

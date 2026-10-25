@@ -744,6 +744,7 @@ class MainActivity : Activity() {
             // "未登录" 会把"Qoder 还能签"这件事说没了）
             addView(action("一键签到全部账号", full = true) { claimAllCheckin() })
             addView(linkAction("诊断领取链路") { runQoderDiagnose() }, top(8))
+            addView(linkAction("诊断 Trae 账号") { runTraeDiagnose() }, top(4))
             addView(statusView, top(10))
 
             addView(divider(), top(14))
@@ -1417,6 +1418,46 @@ class MainActivity : Activity() {
     }
 
     /** 诊断：跑一遍领取链路并把原文摊在弹窗里，可一键复制。 */
+    /** Trae 单账号诊断：逐个账号把两个额度接口的原始返回摊出来（不签到、不改状态）。 */
+    private fun runTraeDiagnose() {
+        val metas = TraeAuthStore.list(this)
+        if (metas.isEmpty()) { toast("没有 Trae 账号"); return }
+        toast("诊断中…")
+        thread(name = "trae-diagnose") {
+            val dump = runCatching {
+                metas.joinToString("\n" + "─".repeat(30) + "\n") { m ->
+                    val cred = TraeAuthStore.loadByUid(this, m.uid)
+                    if (cred == null) "uid=${m.uid} 凭据读取失败" else TraeUpstream.diagnose(cred)
+                }
+            }.getOrElse { "诊断异常：${it.javaClass.simpleName}: ${it.message}" }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val box = android.widget.TextView(this).apply {
+                    setText(dump)
+                    typeface = android.graphics.Typeface.MONOSPACE
+                    textSize = 10f
+                    setTextIsSelectable(true)
+                    setPadding(dp(14), dp(12), dp(14), dp(12))
+                }
+                val scroll = android.widget.ScrollView(this).apply { addView(box) }
+                val dlg = android.app.AlertDialog.Builder(this)
+                    .setTitle("Trae 账号诊断")
+                    .setView(scroll)
+                    .setPositiveButton("复制", null)
+                    .setNegativeButton("关闭", null)
+                    .create()
+                dlg.setOnShowListener {
+                    dlg.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("diagnose", dump))
+                        toast("已复制")
+                    }
+                }
+                dlg.show()
+            }
+        }
+    }
+
     private fun runQoderDiagnose() {
         if (QoderAuthStore.list(this).isEmpty()) { toast("没有 Qoder 账号"); return }
         toast("诊断中…")
@@ -1655,6 +1696,9 @@ class MainActivity : Activity() {
 
     /** Token 是否需要续期：过期则需重新登录，临近则由后台自动用 refresh 续期。 */
     private fun tokenRenewLabel(expiresAt: Long): String {
+        // 只看到期时间会说谎：token 可能"没过期但已被服务端拒绝"。
+        // 有实测证据（查额度/签到撞 401/1001）时以证据为准。
+        if (checkinAuthFailed) return "已被服务端拒绝 · 需重新登录"
         if (expiresAt <= 0L) return "未知（无到期信息）"
         val remainSec = expiresAt - System.currentTimeMillis() / 1000
         return if (remainSec <= 0) "已过期 · 需重新登录"
@@ -2379,7 +2423,7 @@ class MainActivity : Activity() {
                 } else if (known?.enable == false) {
                     Triple(known, null, null as Long?)
                 } else {
-                    val code = TraeUpstream.claimCheckin(cred.accessToken, cred.uid)
+                    val code = TraeUpstream.claimCheckinHealing(this, cred)
                     // 签到后重查积分与状态：拿到最新余额，同时把按钮切成「今日已签到」
                     val u = TraeUpstream.fetchUsage(cred.accessToken, cred.uid)
                     val after = TraeUpstream.fetchCheckinHealing(this, cred)
@@ -2407,6 +2451,9 @@ class MainActivity : Activity() {
                     when {
                         TraeUpstream.checkinSucceeded(known, after, code) -> "签到成功"
                         after?.checkedIn == true -> "今日已签到"
+                        // 别把"token 被拒"说成"网络不通"：两种原因，两个方向的处置
+                        code == null && TraeUpstream.lastAuthFailed ->
+                            "签到失败：token 已被服务端拒绝，请重新登录该账号"
                         code == null -> "签到失败：网络不通，请稍后重试"
                         // 9074 = 上游判"操作太过频繁"。参考 trae-mate（trae_instance.rs:111）：
                         // **多账号共用同一设备 id 领取**就会撞上它。走到这里说明重查后仍未签

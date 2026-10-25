@@ -238,7 +238,7 @@ object BatchCheckin {
                 ?: return PerAccount(meta.uid, name, "fail", -1, "拉取签到状态失败（网络或上游异常）")
             if (before.checkedIn) return PerAccount(meta.uid, name, "already", before.credits, "")
             if (!before.enable) return PerAccount(meta.uid, name, "disabled", -1, "该账号未开放签到")
-            val code = TraeUpstream.claimCheckin(cred.accessToken, cred.uid, reg)
+            val code = TraeUpstream.claimCheckinHealing(ctx, cred)
             val after = TraeUpstream.fetchCheckinHealing(ctx, cred)
             when {
                 TraeUpstream.checkinSucceeded(before, after, code) ->
@@ -246,7 +246,11 @@ object BatchCheckin {
                 after?.checkedIn == true ->
                     // 状态已是已签但合取判据没过（如 code 异常但跃迁已发生）：按已签归档，不报错
                     PerAccount(meta.uid, name, "already", after.credits, "")
-                code == null -> PerAccount(meta.uid, name, "fail", -1, "网络不通，签到请求未送达")
+                code == null -> PerAccount(
+                    meta.uid, name, "fail", -1,
+                    if (TraeUpstream.lastAuthFailed) "token 被服务端拒绝，需重新登录"
+                    else "网络不通，签到请求未送达",
+                )
                 code == 9074 -> PerAccount(meta.uid, name, "fail", -1, "上游判定操作过于频繁（9074），请稍后手动重试")
                 else -> PerAccount(meta.uid, name, "fail", -1, "签到未生效（code=$code）")
             }
