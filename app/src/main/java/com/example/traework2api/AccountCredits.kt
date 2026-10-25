@@ -171,7 +171,18 @@ object AccountCredits {
      * @param force 无视 TTL 强制打上游（用户手动点刷新时用）
      * @param onDone 完成回调（主线程）；中途失败也会回调，附最终快照
      */
-    fun refreshAll(ctx: Context, force: Boolean = false, onDone: ((Snapshot) -> Unit)? = null) {
+    /**
+     * 刷新积分。
+     *
+     * [onlyUid] 非空时**只查这一个账号**（用户规则：用哪个平台就只查那个号）。
+     * 传 null 才是"全量刷新"——只在用户手动点「刷新」时才该走这条路。
+     */
+    fun refreshAll(
+        ctx: Context,
+        force: Boolean = false,
+        onlyUid: String? = null,
+        onDone: ((Snapshot) -> Unit)? = null,
+    ) {
         if (!force && fresh()) {
             onDone?.let { cb -> main.post { cb(snapshot) } }
             return
@@ -183,7 +194,7 @@ object AccountCredits {
         thread(name = "account-credits") {
             var next = snapshot
             try {
-                next = fetchAll(app)
+                next = if (onlyUid == null) fetchAll(app) else fetchOne(app, onlyUid)
                 saveCache(app, next)
                 Log.i(TAG, "积分刷新完成：Trae ${next.known(TRAE).size}/${next.total(TRAE)}，" +
                     "Qoder ${next.known(QODER).size}/${next.total(QODER)}")
@@ -218,6 +229,26 @@ object AccountCredits {
         return last
     }
 
+    /**
+     * 只刷新 [uid] 一个账号（先试 Trae，再试 Qoder —— uid 全局唯一）。
+     *
+     * 结果按 uid 合并进现有快照，**其它账号的值原样保留**（不查≠清零）。
+     */
+    private fun fetchOne(ctx: Context, uid: String): Snapshot {
+        val items = LinkedHashMap(snapshot.items)
+        val old = items[key(TRAE, uid)] ?: items[key(QODER, uid)]
+        val now = System.currentTimeMillis()
+
+        val traeMeta = TraeAuthStore.list(ctx).firstOrNull { it.uid == uid }
+        if (traeMeta != null) {
+            items[key(TRAE, uid)] = fetchTraeItem(ctx, traeMeta, old, now)
+        } else {
+            val qMeta = QoderAuthStore.list(ctx).firstOrNull { it.uid == uid }
+            if (qMeta != null) items[key(QODER, uid)] = fetchQoderItem(ctx, qMeta, old, now)
+        }
+        return snapshot.copy(items = items, at = now)
+    }
+
     private fun fetchAll(ctx: Context): Snapshot {
         val map = LinkedHashMap<String, Item>()
         val prev = snapshot.items
@@ -229,8 +260,24 @@ object AccountCredits {
         // ---- Trae ----
         val traeMetas = try { TraeAuthStore.list(ctx) } catch (_: Exception) { emptyList() }
         for (m in traeMetas) {
-            val old = keep(TRAE, m.uid)
-            val item = try {
+            map[key(TRAE, m.uid)] = fetchTraeItem(ctx, m, keep(TRAE, m.uid), now)
+        }
+        // ---- Qoder ----
+        val qMetas = try { QoderAuthStore.list(ctx) } catch (_: Exception) { emptyList() }
+        for (m in qMetas) {
+            map[key(QODER, m.uid)] = fetchQoderItem(ctx, m, keep(QODER, m.uid), now)
+        }
+        return snapshot.copy(items = map, at = now)
+    }
+
+    /** 单个 Trae 账号查积分（供 fetchAll 与 fetchOne 共用，避免两处逻辑漂移）。 */
+    private fun fetchTraeItem(
+        ctx: Context,
+        m: TraeAuthStore.AccountMeta,
+        old: Item?,
+        now: Long,
+    ): Item {
+        val item = try {
                 if (!m.region.isSupported) {
                     // 国际服签到/积分协议未实测：不硬打上游，明确标注而不是显示 0
                     Item(TRAE, m.uid, old?.remaining, false, "国际服不支持", old?.at ?: 0L)
@@ -268,14 +315,17 @@ object AccountCredits {
             } catch (e: Exception) {
                 Item(TRAE, m.uid, old?.remaining, false, e.javaClass.simpleName, old?.at ?: 0L)
             }
-            map[key(TRAE, m.uid)] = item
-        }
+        return item
+    }
 
-        // ---- Qoder ----
-        val qMetas = try { QoderAuthStore.list(ctx) } catch (_: Exception) { emptyList() }
-        for (m in qMetas) {
-            val old = keep(QODER, m.uid)
-            val item = try {
+    /** 单个 Qoder 账号查积分（同上，抽出来共用）。 */
+    private fun fetchQoderItem(
+        ctx: Context,
+        m: QoderAuthStore.QMeta,
+        old: Item?,
+        now: Long,
+    ): Item {
+        val item = try {
                 val cred = QoderAuthStore.loadByUid(ctx, m.uid)
                 if (cred == null) {
                     Item(QODER, m.uid, old?.remaining, false, "本地凭证缺失", old?.at ?: 0L)
@@ -298,10 +348,7 @@ object AccountCredits {
             } catch (e: Exception) {
                 Item(QODER, m.uid, old?.remaining, false, e.javaClass.simpleName, old?.at ?: 0L)
             }
-            map[key(QODER, m.uid)] = item
-        }
-
-        return Snapshot(map, now, false)
+        return item
     }
 
     /** 清空缓存（账号全删时用，避免残留别人的积分）。 */

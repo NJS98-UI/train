@@ -599,6 +599,7 @@ class MainActivity : Activity() {
         addView(card {
             addView(row {
                 addView(text("积分总计", FS_CARD_TITLE, true), weighted())
+                // 这是**用户主动点**的刷新，允许全量（只有这条路径会遍历所有账号）
                 addView(linkAction("刷新") {
                     toast("正在查询全部账号积分…")
                     AccountCredits.refreshAll(this@MainActivity, force = true) { refreshCreditViews() }
@@ -807,9 +808,16 @@ class MainActivity : Activity() {
             }, top(12))
         }, top(8))
 
-        // 先用缓存把数字画上（进页面立刻有数），再后台刷新全部账号
+        // 先用缓存把数字画上（进页面立刻有数）
         refreshCreditViews()
-        AccountCredits.refreshAll(this@MainActivity) { refreshCreditViews() }
+        // **不在这里全量刷新**。以前每次渲染账号页都会把所有账号问一遍（进进出出就是几十次），
+        // 这正是把账号刷废的来源之一。现在只刷新"当前在使用的那一个"：
+        // 用户想看别的号，点账号选择里的「刷新」或切过去即可。
+        val activeForCredits = TraeAuthStore.activeUid(this@MainActivity)
+            ?: QoderAuthStore.activeUid(this@MainActivity)
+        if (activeForCredits != null) {
+            AccountCredits.refreshAll(this@MainActivity, onlyUid = activeForCredits) { refreshCreditViews() }
+        }
 
         // 登记"监测器要把哪些控件原地刷新"
         monitorApply = {
