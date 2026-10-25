@@ -596,7 +596,7 @@ class MainActivity : Activity() {
                     // 卡上直接签到：不用滚到页面底部的一键签到
                     addView(row(8) {
                         addView(
-                            action(if (accountCheckin?.checkedIn == true) "今日已签到" else "签到", outlined = true) {
+                            action(if (accountCheckin?.checkedIn == true) "已签到" else "签到", outlined = true) {
                                 claimCheckin()
                             },
                             weighted(),
@@ -639,7 +639,14 @@ class MainActivity : Activity() {
                 if (qActiveMeta != null) {
                     addView(row(8) {
                         addView(
-                            action(if (qoderClaimBusy) "领取中…" else "领取", outlined = true) {
+                            action(
+                                when {
+                                    qoderClaimBusy -> "领取中…"
+                                    qoderClaimedToday(qActiveMeta.uid) -> "已领取"
+                                    else -> "领取"
+                                },
+                                outlined = true,
+                            ) {
                                 claimQoderForUid(qActiveMeta.uid)
                             },
                             weighted(),
@@ -810,6 +817,23 @@ class MainActivity : Activity() {
                 if (m.uid == active) {
                     addView(text("\u2713", FS_CARD_TITLE, true, "success"), lp(-2, -2, start = 10))
                 }
+                addView(text("删除", FS_CHIP, false, "error").apply {
+                    setPadding(dp(12), dp(4), dp(2), dp(4))
+                    setOnClickListener {
+                        confirmDialog(
+                            "删除账号",
+                            "删除「${m.nickname.ifBlank { m.uid }}」？本地凭证会一起清掉。",
+                            "删除",
+                            danger = true,
+                        ) {
+                            TraeAuthStore.remove(this@MainActivity, m.uid)
+                            AccountCredits.refreshAll(this@MainActivity, force = true)
+                            pickerDialogRef?.dismiss()
+                            toast("已删除")
+                            render(Page.ACCOUNT)
+                        }
+                    }
+                }, lp(-2, -2, start = 6))
             })
             panel.addView(divider())
         }
@@ -838,6 +862,23 @@ class MainActivity : Activity() {
                 if (m.uid == active) {
                     addView(text("\u2713", FS_CARD_TITLE, true, "success"), lp(-2, -2, start = 10))
                 }
+                addView(text("删除", FS_CHIP, false, "error").apply {
+                    setPadding(dp(12), dp(4), dp(2), dp(4))
+                    setOnClickListener {
+                        confirmDialog(
+                            "删除账号",
+                            "删除「${m.name.ifBlank { m.uid }}」？本地令牌会一起清掉。",
+                            "删除",
+                            danger = true,
+                        ) {
+                            QoderAuthStore.remove(this@MainActivity, m.uid)
+                            AccountCredits.refreshAll(this@MainActivity, force = true)
+                            pickerDialogRef?.dismiss()
+                            toast("已删除")
+                            render(Page.ACCOUNT)
+                        }
+                    }
+                }, lp(-2, -2, start = 6))
             })
             panel.addView(divider())
         }
@@ -1236,6 +1277,8 @@ class MainActivity : Activity() {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     r.onSuccess { c ->
                         toast("登录成功：${c.name.ifBlank { c.email.ifBlank { c.uid } }}")
+                        // 新账号要马上补签：清掉冷却，别等下一轮
+                        AutoCheckin.requestRunSoon(this)
                         qoderRemaining = null
                         CreditMonitor.stale = true
                         render(currentPage)
@@ -1337,6 +1380,9 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 这个账号今天领到过没有（用于按钮显示「领取 / 已领取」）。 */
+    private fun qoderClaimedToday(uid: String): Boolean = QoderCheckin.claimedToday(this, uid)
+
     /** 只领**一个** Qoder 账号（账号卡上的「领取」按钮用）。 */
     private fun claimQoderForUid(uid: String) {
         if (qoderClaimBusy) return
@@ -1345,6 +1391,7 @@ class MainActivity : Activity() {
         thread(name = "qoder-claim-one") {
             val r = runCatching { QoderAuthApi.claimDailyForUid(this, uid) }
                 .getOrElse { QoderAuthApi.QClaimResult("fail", 0, "${it.javaClass.simpleName}: ${it.message}") }
+            if (r.status == "ok") QoderCheckin.markClaimed(this, uid)
             runOnUiThread {
                 qoderClaimBusy = false
                 if (isFinishing || isDestroyed) return@runOnUiThread
@@ -2177,6 +2224,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     result.onSuccess { cred ->
                         toast("登录成功：${cred.nickname.ifBlank { cred.uid }}")
+                        AutoCheckin.requestRunSoon(this)
                         // 新登录的账号可能不是原来那个：缓存作废，否则会显示上一个账号的签到状态
                         invalidateAccountQuota()
                         loadAndRefreshToken()

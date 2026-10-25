@@ -4,33 +4,36 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.util.Log
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Calendar
-import java.util.TimeZone
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 /**
- * 启动补签：每次打开 App，把**全部平台、全部账号**当天没签的签到补上。
- *
- * 为什么需要它：定时签到依赖 AlarmManager，而进程被杀 / 手机重启后闹钟不会自己回来
- * （本 App 没有 BOOT 自启）。用户不该为了"今天有没有签到"专门记着去点按钮。
+ * 补签：把**全部平台、全部账号**当天没签的补上。
  *
  * 三条纪律：
- *  1. **每天只跑一次**（[KEY_DATE] 记日期）——否则每次切回前台都会把上游打一遍。
+ *  1. **按账号记"今天已处理"**（[KEY_DONE] 存 `平台:uid → 日期`），不是按天记一次。
+ *     按天记的老毛病：今天已经跑过一轮，用户新加一个账号，那个账号今天永远不会被补签。
  *  2. **只补没签的**：先查状态，`checkedIn` 或上游 `enable=false` 都直接跳过，绝不硬发 claim。
- *  3. **失败不影响 App**：整个流程包在 runCatching 里，网络/令牌问题只写日志。
+ *  3. **失败不影响 App**：整段包在 runCatching 里，网络/令牌问题只写日志，账号留着下轮再试。
  */
 object AutoCheckin {
 
+    private const val TAG = "AutoCheckin"
     private const val PREFS = "traework2api_prefs"
-    private const val KEY_DATE = "auto_checkin_date"
+
+    /** `{"trae:uid":"2026-10-25", ...}` —— 每个账号各自记到哪天处理完。 */
+    private const val KEY_DONE = "auto_checkin_done"
     private const val KEY_LAST_TRY = "auto_checkin_last_try"
 
     /**
      * 重试冷却：没领到就别一直打上游，但**不能一天只试一次**。
      *
-     * 活动是到点才开（例：每天 10:00 开放当日领取）。如果 9:50 打开 App 就把"今天已跑过"
+     * 活动是到点才开（每天 10:00 UTC+8 刷新）。如果 9:50 打开 App 就把"今天已跑过"
      * 记下来，10:00 之后开多少次都不会再领 —— 用户看到的就是"时间到了 App 也不会领"。
      */
     private const val RETRY_COOLDOWN_MS = 10 * 60 * 1000L
@@ -40,6 +43,65 @@ object AutoCheckin {
     private const val REQ_AUTO = 8801
     private const val WINDOW_HOUR = 10
     private const val WINDOW_MINUTE = 5
+
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun today(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+    private fun doneMap(ctx: Context): JSONObject = runCatching {
+        JSONObject(prefs(ctx).getString(KEY_DONE, "{}") ?: "{}")
+    }.getOrElse { JSONObject() }
+
+    private fun isDone(ctx: Context, key: String): Boolean = doneMap(ctx).optString(key, "") == today()
+
+    /** 记一个账号"今天处理完"。只写内存外的 prefs，不动其它账号的记录。 */
+    fun markDone(ctx: Context, key: String) {
+        val o = doneMap(ctx)
+        runCatching { o.put(key, today()) }
+        prefs(ctx).edit().putString(KEY_DONE, o.toString()).apply()
+    }
+
+    /**
+     * 今天还没处理的账号，返回 `平台 to uid`。
+     *
+     * 这就是"新登录的账号会不会被补签"的答案：只要它在账号表里且今天没记过，就会被列进来。
+     */
+    fun pending(ctx: Context): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        runCatching {
+            for (m in TraeAuthStore.list(ctx)) {
+                if (!isDone(ctx, "trae:${m.uid}")) out.add("trae" to m.uid)
+            }
+        }.onFailure { Log.w(TAG, "读 Trae 账号失败: ${it.javaClass.simpleName}") }
+        runCatching {
+            for (m in QoderAuthStore.list(ctx)) {
+                if (!isDone(ctx, "qoder:${m.uid}")) out.add("qoder" to m.uid)
+            }
+        }.onFailure { Log.w(TAG, "读 Qoder 账号失败: ${it.javaClass.simpleName}") }
+        return out
+    }
+
+    /**
+     * 让下一轮补签立刻可跑（清掉冷却）。
+     *
+     * 新登录/新粘贴进来的账号必须马上补签，不能等 10 分钟冷却 ——
+     * 用户加完账号就切走，等不到下一轮。
+     */
+    fun requestRunSoon(ctx: Context) {
+        prefs(ctx).edit().putLong(KEY_LAST_TRY, 0L).apply()
+    }
+
+    /** 今天是否**全部账号**都处理完了。 */
+    fun alreadyRanToday(ctx: Context): Boolean = pending(ctx).isEmpty()
+
+    /**
+     * 现在该不该尝试一轮：还有没处理的账号 + 距上次尝试超过冷却。
+     */
+    fun shouldAttempt(ctx: Context): Boolean {
+        if (pending(ctx).isEmpty()) return false
+        val last = prefs(ctx).getLong(KEY_LAST_TRY, 0L)
+        return System.currentTimeMillis() - last >= RETRY_COOLDOWN_MS
+    }
 
     /** 下一次开窗时刻（毫秒）。今天已过就顺延到明天。 */
     fun nextWindowAt(now: Long = System.currentTimeMillis()): Long {
@@ -67,88 +129,71 @@ object AutoCheckin {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         runCatching { am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, nextWindowAt(), pi) }
-            .onFailure { android.util.Log.w(TAG, "开窗闹钟挂不上: ${it.javaClass.simpleName}") }
-    }
-    private const val TAG = "AutoCheckin"
-
-    private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-
-    fun today(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-
-    /** 今天是否已经**收工**（领到了，或确认没有可领的）。 */
-    fun alreadyRanToday(ctx: Context): Boolean = prefs(ctx).getString(KEY_DATE, null) == today()
-
-    private fun markDone(ctx: Context) {
-        prefs(ctx).edit().putString(KEY_DATE, today()).apply()
+            .onFailure { Log.w(TAG, "开窗闹钟挂不上: ${it.javaClass.simpleName}") }
     }
 
     /**
-     * 现在该不该尝试一轮。
+     * 跑一轮补签。返回摘要（无账号或未到冷却返回 null）。
      *
-     * - 今天已收工 → 不试
-     * - 距上次尝试不到 [RETRY_COOLDOWN_MS] → 不试（防抖）
-     * - 否则 → 试（这就是"到点后再开 App 还能领"的那条路）
-     */
-    fun shouldAttempt(ctx: Context): Boolean {
-        if (alreadyRanToday(ctx)) return false
-        val last = prefs(ctx).getLong(KEY_LAST_TRY, 0L)
-        return System.currentTimeMillis() - last >= RETRY_COOLDOWN_MS
-    }
-
-    /**
-     * 跑一轮补签。**调用方负责放到后台线程。**
-     *
-     * @return 人类可读摘要（null = 今天已经跑过 / 没有可签的账号）
+     * 逐账号处理：每个账号单独查状态、单独记"今天处理完"，
+     * 所以中途加进来的新账号、上轮失败的账号都会在下一轮被捡起来。
      */
     fun runAllOnce(ctx: Context): String? {
         if (!shouldAttempt(ctx)) return null
         prefs(ctx).edit().putLong(KEY_LAST_TRY, System.currentTimeMillis()).apply()
         val parts = ArrayList<String>()
-        var claimed = false
-        var allSettled = true
+        val todo = pending(ctx)
+        if (todo.isEmpty()) return null
 
-        // ---- Trae：逐个账号查状态，未签才签 ----
-        runCatching {
-            for (m in TraeAuthStore.list(ctx)) {
-                val cred = TraeAuthStore.loadByUid(ctx, m.uid) ?: continue
-                if (cred.accessToken.isBlank()) continue
-                val st = TraeUpstream.fetchCheckin(cred.accessToken, m.uid, cred.region) ?: continue
-                if (st.checkedIn || !st.enable) continue
-                val code = TraeUpstream.claimCheckin(cred.accessToken, m.uid, cred.region) ?: continue
-                if (code in 200..299) {
-                    claimed = true
-                    parts.add("Trae ${m.nickname.ifBlank { m.uid }} 已签到")
+        // ---- Trae：逐账号查状态，未签才签 ----
+        val traeNames = runCatching { TraeAuthStore.list(ctx).associate { it.uid to it.nickname } }
+            .getOrElse { emptyMap() }
+        for ((plat, uid) in todo) {
+            if (plat != "trae") continue
+            runCatching {
+                val cred = TraeAuthStore.loadByUid(ctx, uid) ?: return@runCatching
+                if (cred.accessToken.isBlank()) return@runCatching
+                val st = TraeUpstream.fetchCheckin(cred.accessToken, uid, cred.region) ?: return@runCatching
+                if (st.checkedIn || !st.enable) {
+                    markDone(ctx, "trae:$uid")     // 已签 / 未开放 → 今天不用再管这个号
+                    return@runCatching
                 }
-            }
-        }.onFailure { android.util.Log.w(TAG, "Trae 补签失败: ${it.javaClass.simpleName}: ${it.message}") }
+                val code = TraeUpstream.claimCheckin(cred.accessToken, uid, cred.region) ?: return@runCatching
+                if (code in 200..299) {
+                    markDone(ctx, "trae:$uid")
+                    parts.add("Trae ${traeNames[uid]?.ifBlank { null } ?: uid} 已签到")
+                }
+            }.onFailure { Log.w(TAG, "Trae $uid 补签失败: ${it.javaClass.simpleName}") }
+        }
 
-        // ---- Qoder：全部账号领每日 Credits（复用定时领取那一套，含结果落盘）----
-        runCatching {
-            if (QoderAuthStore.list(ctx).isNotEmpty()) {
+        // ---- Qoder：有未处理的账号才跑整批（复用定时领取那一套，含结果落盘）----
+        if (todo.any { it.first == "qoder" }) {
+            runCatching {
                 val r = QoderCheckin.runAll(ctx)
-                if (r.results.any { it.ok }) claimed = true
-                // 全失败（网络/令牌）说明还没跑成，别封盘，等下一轮重试
-                if (r.results.any { !it.ok && it.status != "already" }) allSettled = false
+                for (p in r.results) {
+                    // 领到了或确认无可领 → 这个号今天收工；失败留着下轮重试
+                    if (p.status == "ok" || p.status == "already") markDone(ctx, "qoder:${p.uid}")
+                }
                 parts.add("Qoder " + r.results.joinToString("；") { QoderCheckin.statusLabel(it) })
-            }
-        }.onFailure { android.util.Log.w(TAG, "Qoder 补签失败: ${it.javaClass.simpleName}: ${it.message}") }
+            }.onFailure { Log.w(TAG, "Qoder 补签失败: ${it.javaClass.simpleName}") }
+        }
 
-        // 领到了、或确实没有可领的 → 今天收工；否则留着下次再试（活动可能到点才开）
-        if (claimed || allSettled) markDone(ctx)
         if (parts.isEmpty()) return null
         val summary = parts.joinToString(" · ")
-        android.util.Log.i(TAG, "启动补签: $summary")
+        Log.i(TAG, "补签: $summary")
         return summary
     }
 
+    /** 纯计算自检：不碰网络/闹钟。 */
     fun selfCheck() {
         // 日期键必须随日期变化：写死会让"每天一次"退化成"永远只跑一次"
         check(today().matches(Regex("^\\d{4}-\\d{2}-\\d{2}$"))) { "自检失败：日期格式不对" }
-        // 冷却必须是正数：写成 0 就等于每次前台都打一遍上游
         check(RETRY_COOLDOWN_MS >= 60_000L) { "自检失败：重试冷却过短" }
+        // 账号维度的键必须带平台前缀，否则 Trae/Qoder 撞 uid 时会互相顶掉
+        check("trae:abc" != "qoder:abc") { "自检失败：账号键必须带平台前缀" }
         // 窗口必须落在 10:00 之后几分钟：算成 9:55 就等于永远抢不到当天活动
-        val t = nextWindowAt(0L)
-        val cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Singapore")).apply { timeInMillis = t }
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("Asia/Singapore"))
+            .apply { timeInMillis = nextWindowAt(0L) }
         check(cal.get(Calendar.HOUR_OF_DAY) == WINDOW_HOUR) { "自检失败：开窗小时不对" }
         check(nextWindowAt(System.currentTimeMillis()) > System.currentTimeMillis()) {
             "自检失败：下一次开窗必须在未来"

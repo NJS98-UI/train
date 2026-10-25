@@ -200,6 +200,24 @@ object AccountCredits {
         }
     }
 
+    /**
+     * 单账号查积分偶发失败（上游限流/瞬时 5xx）就再试两次。
+     *
+     * 现场表现是"同一平台里只有一个账号查不到、别的都正常"——多打两次基本就回来了，
+     * 比直接在界面上标"查询失败"有用。
+     */
+    private fun <T> retryFetch(block: () -> T?): T? {
+        var last: T? = null
+        for (i in 1..3) {
+            last = runCatching(block).getOrNull()
+            if (last != null) return last
+            if (i < 3) {
+                try { Thread.sleep(400L * i) } catch (_: InterruptedException) { return null }
+            }
+        }
+        return last
+    }
+
     private fun fetchAll(ctx: Context): Snapshot {
         val map = LinkedHashMap<String, Item>()
         val prev = snapshot.items
@@ -228,7 +246,7 @@ object AccountCredits {
                         if (tok.isNullOrBlank()) {
                             Item(TRAE, m.uid, old?.remaining, false, "token 不可用", old?.at ?: 0L)
                         } else {
-                            val bal = TraeUpstream.fetchUsage(tok, cred.uid, m.region)
+                            val bal = retryFetch { TraeUpstream.fetchUsage(tok, cred.uid, m.region) }
                             if (bal == null) {
                                 Item(TRAE, m.uid, old?.remaining, false, "查询失败", old?.at ?: 0L)
                             } else {
@@ -259,7 +277,7 @@ object AccountCredits {
                     if (jt.isNullOrBlank()) {
                         Item(QODER, m.uid, old?.remaining, false, "token 不可用", old?.at ?: 0L)
                     } else {
-                        val c = QoderAuthApi.fetchCredits(jt, cred.mode)
+                        val c = retryFetch { QoderAuthApi.fetchCredits(jt, cred.mode) }
                         if (c == null) {
                             Item(QODER, m.uid, old?.remaining, false, "查询失败", old?.at ?: 0L)
                         } else {
@@ -309,13 +327,8 @@ object AccountCredits {
      * 有账号失败时显示 `1234（2/3 个账号）` —— 必须让人看出这是**下界**，
      * 而不是"总共就这么多"。
      */
-    fun totalLabel(s: Snapshot, platform: String): String {
-        val sum = s.sum(platform) ?: return "—"
-        val known = s.known(platform).size
-        val all = s.total(platform)
-        val base = format(sum)
-        return if (all > 0 && known < all) "$base（$known/$all 个账号）" else base
-    }
+    /** 平台合计：只报数字，不带「(2/3 个账号)」这种括号说明。 */
+    fun totalLabel(s: Snapshot, platform: String): String = format(s.sum(platform))
 
     // ------------------------------------------------------------------
     // 自检

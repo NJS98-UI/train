@@ -36,6 +36,7 @@ object QoderCheckin {
     private const val KEY_ENABLED = "schedule_enabled"
     private const val KEY_TIME = "schedule_time"
     private const val KEY_LAST_RUN_DATE = "last_run_date"
+    private const val KEY_CLAIMED = "qoder_claimed"
     private const val KEY_LAST_RESULTS = "last_results"
 
     private const val CHANNEL_ID = "qoder_checkin"
@@ -150,6 +151,7 @@ object QoderCheckin {
         val results = raw.map { (uid, r) ->
             PerAccount(uid, names[uid] ?: uid, r.status, r.amount, r.message)
         }
+        for (p in results) if (p.status == "ok") markClaimed(ctx, p.uid)
         val today = today()
         prefs(ctx).edit()
             .putString(KEY_LAST_RUN_DATE, today)
@@ -224,6 +226,24 @@ object QoderCheckin {
     // ------------------------------------------------------------------
 
     /** 上次批量结果（无/损坏返回 null）。 */
+    /**
+     * 按账号记"今天领过"（`{uid: yyyy-MM-dd}`）。
+     *
+     * 为什么不用 [lastResults]：那个是**整批**跑完才写的，
+     * 账号卡上单独点「领取」不会经过 runAll，按钮就会一直显示「领取」。
+     */
+    fun markClaimed(ctx: Context, uid: String) {
+        val o = runCatching { JSONObject(prefs(ctx).getString(KEY_CLAIMED, "{}") ?: "{}") }
+            .getOrElse { JSONObject() }
+        runCatching { o.put(uid, today()) }
+        prefs(ctx).edit().putString(KEY_CLAIMED, o.toString()).apply()
+    }
+
+    /** 这个账号今天领到过没有（账号卡按钮据此显示「领取 / 已领取」）。 */
+    fun claimedToday(ctx: Context, uid: String): Boolean = runCatching {
+        JSONObject(prefs(ctx).getString(KEY_CLAIMED, "{}") ?: "{}").optString(uid, "") == today()
+    }.getOrDefault(false)
+
     fun lastResults(ctx: Context): BatchResult? {
         val raw = prefs(ctx).getString(KEY_LAST_RESULTS, null) ?: return null
         val date = prefs(ctx).getString(KEY_LAST_RUN_DATE, null) ?: return null
