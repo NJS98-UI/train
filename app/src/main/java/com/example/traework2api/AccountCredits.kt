@@ -250,13 +250,15 @@ object AccountCredits {
                             if (bal == null) {
                                 // 还不行就强制续一次 token 再试：token 被提前判废（未到期但已失效）
                                 // 是"同一平台只有一个号查不到"的常见成因。
-                                val t2 = TraeAuthApi.forceRefreshTokenFor(ctx, cred)
+                                // 续期会轮换 refreshToken，必须与转发链路互斥（否则两处一起续会把对方顶掉）
+                                val t2 = Gateway.locked { TraeAuthApi.forceRefreshTokenFor(ctx, cred) }
                                 if (!t2.isNullOrBlank() && t2 != tok) {
                                     bal = retryFetch { TraeUpstream.fetchUsage(t2, cred.uid, m.region) }
                                 }
                             }
                             if (bal == null) {
-                                Item(TRAE, m.uid, old?.remaining, false, "查询失败", old?.at ?: 0L)
+                                val why = if (TraeUpstream.lastAuthFailed) "token 失效" else "查询失败"
+                                Item(TRAE, m.uid, old?.remaining, false, why, old?.at ?: 0L)
                             } else {
                                 Item(TRAE, m.uid, bal.toDouble(), bal <= 0L, null, now)
                             }

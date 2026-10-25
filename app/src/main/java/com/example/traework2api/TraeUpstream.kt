@@ -70,6 +70,17 @@ object TraeUpstream {
     /** 合法模型 id 形状（上游 `config_name` 就是这套字符集，含 `o4-mini` 这类名字）。 */
     private val MODEL_ID_RE = Regex("^[A-Za-z0-9._-]{1,64}$")
 
+    /**
+     * 最近一次 [ug] 调用是否因**鉴权失败**（HTTP 401/403，或业务码 1001）而返回 null。
+     *
+     * 为什么要这个标志：`fetchUsage`/`fetchCheckin` 失败都返回 null，
+     * 上层无法区分"网络抖了"和"token 被拒"。有了它，界面才能说
+     * "token 失效，请重新登录"，而不是含糊的"查询失败"。
+     */
+    @Volatile
+    var lastAuthFailed: Boolean = false
+        private set
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
@@ -221,9 +232,17 @@ object TraeUpstream {
             .header("Sec-Fetch-Site", "none")
             .header("X-User-Region", region.userRegionHeader.ifBlank { "CN" })
         val req = b.build()
+        lastAuthFailed = false
         return try {
             client.newCall(req).execute().use { r ->
-                if (!r.isSuccessful || r.body == null) null else JSONObject(r.body!!.string())
+                val text = r.body?.string().orEmpty()
+                if (r.code == 401 || r.code == 403) { lastAuthFailed = true; return null }
+                if (!r.isSuccessful || text.isBlank()) return null
+                val o = runCatching { JSONObject(text) }.getOrNull() ?: return null
+                // 实测：token 无效时 status 接口回 **HTTP 200 + code=1001 + enable=false**。
+                // 那不是"该账号未开放签到"，是鉴权失败 —— 必须单独标出来。
+                if (o.optInt("code", 0) == 1001) { lastAuthFailed = true; return null }
+                o
             }
         } catch (_: Exception) { null }
     }
@@ -373,11 +392,30 @@ object TraeUpstream {
      * 抽出来单独一个函数是为了**能自检**（`fetchCheckin` 要发网络请求，自检里不能打上游）。
      * 回落规则：字段缺失按 `false`/`0` 处理，**不抛异常** —— 上游多给/少给字段不该让页面崩。
      */
-    internal fun parseCheckin(root: JSONObject): CheckinStatus = CheckinStatus(
-        checkedIn = root.optBoolean("checked_in", false),
-        credits = root.optLong("credits", 0),
-        enable = root.optBoolean("enable", false),
-    )
+    internal fun parseCheckin(root: JSONObject): CheckinStatus? {
+        // code=1001 = 未通过鉴权。此时上游照样给 enable=false，
+        // 直接采信就会把"token 失效"显示成"该账号没有签到权限"（0.7.11 及以前就是这个错）。
+        if (root.optInt("code", 0) == 1001) return null
+        return CheckinStatus(
+            checkedIn = root.optBoolean("checked_in", false),
+            credits = root.optLong("credits", 0),
+            enable = root.optBoolean("enable", false),
+        )
+    }
+
+    /**
+     * 带自愈的状态查询：失败且是鉴权问题 → 强制续一次 token 再试。
+     *
+     * 现场症状是"今天签到成功了，过一会儿突然变成没有签到权限、积分也查不到" ——
+     * 典型就是 token 未到期但已被判废（另一处登录/续期把它顶掉了）。
+     */
+    fun fetchCheckinHealing(ctx: android.content.Context, cred: TraeAuthStore.Cred): CheckinStatus? {
+        fetchCheckin(cred.accessToken, cred.uid, cred.region)?.let { return it }
+        if (!lastAuthFailed) return null
+        // 续期轮换 refreshToken，与转发链路互斥，避免互相顶掉
+        val t2 = Gateway.locked { TraeAuthApi.forceRefreshTokenFor(ctx, cred) } ?: return null
+        return fetchCheckin(t2, cred.uid, cred.region)
+    }
 
     /**
      * 拉上游真实模型表（`get_detail_param`，照抄 reference/traework2api 的 FetchModels）。
@@ -603,17 +641,21 @@ object TraeUpstream {
         val real = parseCheckin(JSONObject(
             """{"checked_in":true,"code":0,"credits":150,"did_checked_in":false,""" +
                 """"enable":true,"extra_credits":50,"message":"success"}"""
-        ))
+        ))!!
         check(real.checkedIn) { "自检失败：checked_in=true 应解析为已签" }
         check(real.credits == 150L) { "自检失败：credits 应解析为 150" }
         check(real.enable) { "自检失败：enable=true 应解析为开放签到" }
         // 未签 + 未开放：两个布尔必须各自独立解析（混了会让按钮该灰的时候可点）
-        val fresh = parseCheckin(JSONObject("""{"checked_in":false,"enable":false,"credits":100}"""))
+        val fresh = parseCheckin(JSONObject("""{"checked_in":false,"enable":false,"credits":100}"""))!!
         check(!fresh.checkedIn && !fresh.enable) { "自检失败：未签/未开放应都为 false" }
         check(fresh.credits == 100L) { "自检失败：未签时 credits 仍应解析" }
         // 字段缺失不许崩（上游加字段/少字段都要活）
-        val empty = parseCheckin(JSONObject("{}"))
+        val empty = parseCheckin(JSONObject("{}"))!!
         check(!empty.checkedIn && !empty.enable && empty.credits == 0L) { "自检失败：字段缺失应回落而非抛异常" }
+        // 鉴权失败必须回 null，不能把 enable=false 当业务状态（这就是"没有签到权限"假警报的来源）
+        check(parseCheckin(JSONObject("""{"checked_in":false,"code":1001,"enable":false}""")) == null) {
+            "自检失败：code=1001 应判鉴权失败而不是 enable=false"
+        }
 
         // 签到成功的判据是「成功码 AND 状态跃迁」的**合取**，两个方向都要钉住：
         // 只会 code → 被"HTTP 200 + 业务拒绝"骗；只看跃迁 → 把 code=9004 的

@@ -8,6 +8,22 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.12] - 2026-10-17
+
+### Fixed（两个假警报，根因同一个：token 被拒）
+- **「没有签到权限」是误报**：实测（2026-10-25）token 无效时
+  `checkin_credits/status` 回的是 **HTTP 200 + `{"code":1001,"enable":false}`**。
+  以前直接采信 `enable=false`，于是把"token 失效"显示成"该账号没有签到权限"。
+  现在 `code=1001` 判为鉴权失败，返回 null，界面显示「token 失效」。
+- **「积分突然查不到」**：`fetchUsage` 撞 401/1001 时不再只说"查询失败"，
+  先强制续一次 token 重试；仍失败则如实标「token 失效」。
+- 新增 `TraeUpstream.fetchCheckinHealing`：签到状态查询自带 401 自愈。
+- 续期统一走 `Gateway.locked`，避免积分查询与转发链路同时续期互相顶掉 refreshToken
+  （这很可能就是"签到成功后过一会儿 token 全废"的成因）。
+
+### Changed
+- Qoder「粘贴 PAT」弹窗**默认国际版**（选中项实心高亮，未选为描边），去掉多余说明文字。
+
 ## [0.7.11] - 2026-10-17
 
 ### Fixed

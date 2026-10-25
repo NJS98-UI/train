@@ -153,6 +153,9 @@ class MainActivity : Activity() {
     private var serviceBusy: String? = null
     /** 积分刷新进行中：数值位显示「…」，否则用户点了「刷新」会觉得没反应。 */
     private var quotaLoading = false
+
+    /** 签到状态查不到且原因是鉴权失败（token 被判废）。 */
+    private var checkinAuthFailed = false
     /** 待写入 SAF 的备份 JSON（导出账号点「保存」后暂存，onActivityResult 拿到 Uri 再落盘）。 */
     private var pendingExportJson: String? = null
     /** 当前 Qoder 账号积分余量（监测器回填，仅展示）。null=未拉到/无账号。 */
@@ -1250,12 +1253,22 @@ class MainActivity : Activity() {
             background = shape("surface_container", RADIUS_CONTROL)
             setPadding(dp(14), dp(12), dp(14), dp(12))
         }
-        // 区域选择用一枚开关按钮就地切换（国内/国际），比再来一层弹窗省一步。
-        var mode = QoderAuthApi.MODE_CN
-        val modeRow = row(8) {
-            addView(action("国内版", outlined = true) { mode = QoderAuthApi.MODE_CN; toast("已选：国内版") }, weighted())
-            addView(action("国际版", outlined = true) { mode = QoderAuthApi.MODE_GLOBAL; toast("已选：国际版") }, weighted(start = 8))
+        // 区域选择：**默认国际版**（绝大多数用户用的是 qoder.sh），选中项实心高亮。
+        var mode = QoderAuthApi.MODE_GLOBAL
+        val modeRow = row(8) {}
+        fun paintMode() {
+            modeRow.removeAllViews()
+            fun btn(label: String, value: String) {
+                val on = mode == value
+                modeRow.addView(
+                    action(label, outlined = !on) { mode = value; paintMode() },
+                    if (modeRow.childCount == 0) weighted() else weighted(start = 8),
+                )
+            }
+            btn("国际版", QoderAuthApi.MODE_GLOBAL)
+            btn("国内版", QoderAuthApi.MODE_CN)
         }
+        paintMode()
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(edit)
@@ -1264,7 +1277,7 @@ class MainActivity : Activity() {
         }
         confirmDialog(
             title = "粘贴 Qoder PAT 登录",
-            message = "在 Qoder 账号集成页创建个人访问令牌后粘贴。默认按国内版，换区域点上面按钮。",
+            message = "在 Qoder 账号集成页创建个人访问令牌后粘贴。",
             okText = "登录",
             content = panel,
         ) {
@@ -1561,6 +1574,7 @@ class MainActivity : Activity() {
      */
     private fun checkinActionLabel(loggedIn: Boolean): String = when {
         checkinBusy -> "签到中…"
+        accountCheckin == null && checkinAuthFailed -> "token 失效"
         accountCheckin == null -> if (loggedIn) "加载中…" else "未登录"
         accountCheckin?.checkedIn == true -> "今日已签到"
         accountCheckin?.enable == false -> "未开放"
@@ -2306,7 +2320,7 @@ class MainActivity : Activity() {
             // 卡 true → 按钮永远「刷新中…」且不再响应点击。
             val pair = runCatching {
                 TraeUpstream.fetchUsage(cred.accessToken, cred.uid) to
-                    TraeUpstream.fetchCheckin(cred.accessToken, cred.uid)
+                    TraeUpstream.fetchCheckinHealing(this, cred)
             }.getOrNull()
             val u = pair?.first
             val c = pair?.second
@@ -2316,6 +2330,8 @@ class MainActivity : Activity() {
                 // 积分/签到状态擦回「—」是净损失，用户会以为数据丢了。
                 accountBalance = u ?: accountBalance
                 accountCheckin = c ?: accountCheckin
+                // 查不到且是鉴权问题 → 界面说"token 失效"，别含糊成"加载中/未开放"
+                if (c == null) checkinAuthFailed = TraeUpstream.lastAuthFailed
                 quotaLoading = false
                 toast(if (u == null) "未获取到额度" else "已更新")
                 quotaApply?.invoke()
@@ -2357,7 +2373,7 @@ class MainActivity : Activity() {
             // 网络层），线程死掉后标志永远为 true → 签到按钮永久卡在「签到中…」。
             val result = try {
                 // 状态未知（before == null）先补查：不能在不知道 enable/checkedIn 的情况下打 claim
-                val known = before ?: TraeUpstream.fetchCheckin(cred.accessToken, cred.uid)
+                val known = before ?: TraeUpstream.fetchCheckinHealing(this, cred)
                 if (known?.checkedIn == true) {
                     Triple(known, null, null as Long?)
                 } else if (known?.enable == false) {
@@ -2366,7 +2382,7 @@ class MainActivity : Activity() {
                     val code = TraeUpstream.claimCheckin(cred.accessToken, cred.uid)
                     // 签到后重查积分与状态：拿到最新余额，同时把按钮切成「今日已签到」
                     val u = TraeUpstream.fetchUsage(cred.accessToken, cred.uid)
-                    val after = TraeUpstream.fetchCheckin(cred.accessToken, cred.uid)
+                    val after = TraeUpstream.fetchCheckinHealing(this, cred)
                     Triple(known, Triple(code, after, u), null)
                 }
             } catch (e: Exception) {
