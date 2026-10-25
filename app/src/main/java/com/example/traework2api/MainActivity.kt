@@ -696,10 +696,17 @@ class MainActivity : Activity() {
                         )
                     }, top(12))
                 }
-                // 国际版领取要机器身份：默认用官方 CLI 同构的本机派生，抓包有真货可覆盖
-                if (qActiveMeta != null && qActiveMeta.mode == QoderAuthApi.MODE_GLOBAL) {
+                // 设备身份：**所有 Qoder 账号都显示入口**（以前只对国际版显示，
+                // 用户在国内版上找不到它）。
+                //   · 国际版领取会带这套身份（有抓包真货就用真货，否则用本机派生）
+                //   · 国内版刻意不带（实测国内带指纹反而 no_campaign）
+                if (qActiveMeta != null) {
                     val captured = QoderAuthStore.fingerprint(this@MainActivity, qActiveMeta.uid) != null
-                    addView(linkAction(if (captured) "设备身份：抓包指纹" else "设备身份：本机派生") {
+                    val isGlobal = qActiveMeta.mode == QoderAuthApi.MODE_GLOBAL
+                    addView(linkAction(
+                        (if (captured) "设备身份：抓包指纹" else "设备身份：本机派生") +
+                            (if (isGlobal) "" else "（国内版不发送）")
+                    ) {
                         promptQoderFingerprint(qActiveMeta.uid)
                     }, top(12))
                 }
