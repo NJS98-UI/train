@@ -593,6 +593,15 @@ class MainActivity : Activity() {
                     addView(labelValue("UID", traeCred.uid), top(4))
                     addView(labelValue("Token", tokenRenewLabel(traeCred.expiresAt)), top(4))
                     addView(creditLabel(AccountCredits.TRAE, traeCred.uid), top(6))
+                    // 卡上直接签到：不用滚到页面底部的一键签到
+                    addView(row(8) {
+                        addView(
+                            action(if (accountCheckin?.checkedIn == true) "今日已签到" else "签到", outlined = true) {
+                                claimCheckin()
+                            },
+                            weighted(),
+                        )
+                    }, top(12))
                 }
             })
             // 第二件：横起来的账户选择（点开弹窗，一排一个账号）
@@ -626,6 +635,17 @@ class MainActivity : Activity() {
                 }
                 addView(caption("积分"), top(10))
                 addView(qoderCreditView!!, top(2))
+                // 卡上直接领取（只领这一个账号，不动其它账号）
+                if (qActiveMeta != null) {
+                    addView(row(8) {
+                        addView(
+                            action(if (qoderClaimBusy) "领取中…" else "领取", outlined = true) {
+                                claimQoderForUid(qActiveMeta.uid)
+                            },
+                            weighted(),
+                        )
+                    }, top(12))
+                }
                 // 国际版领取要机器身份：默认用官方 CLI 同构的本机派生，抓包有真货可覆盖
                 if (qActiveMeta != null && qActiveMeta.mode == QoderAuthApi.MODE_GLOBAL) {
                     val captured = QoderAuthStore.fingerprint(this@MainActivity, qActiveMeta.uid) != null
@@ -1310,6 +1330,25 @@ class MainActivity : Activity() {
                 qoderClaimBusy = false
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 toast(qoderBatchClaimToast(items))
+                qoderRemaining = null
+                CreditMonitor.stale = true
+                render(currentPage)
+            }
+        }
+    }
+
+    /** 只领**一个** Qoder 账号（账号卡上的「领取」按钮用）。 */
+    private fun claimQoderForUid(uid: String) {
+        if (qoderClaimBusy) return
+        qoderClaimBusy = true
+        render(currentPage)
+        thread(name = "qoder-claim-one") {
+            val r = runCatching { QoderAuthApi.claimDailyForUid(this, uid) }
+                .getOrElse { QoderAuthApi.QClaimResult("fail", 0, "${it.javaClass.simpleName}: ${it.message}") }
+            runOnUiThread {
+                qoderClaimBusy = false
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                toast(qoderClaimToast(r))
                 qoderRemaining = null
                 CreditMonitor.stale = true
                 render(currentPage)
