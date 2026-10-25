@@ -8,6 +8,21 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.11] - 2026-10-17
+
+### Fixed
+- Trae 积分查询撞 401 时**强制续一次 token 再试**（`TraeAuthApi.forceRefreshTokenFor`）：
+  "同一平台只有一个号查不到、别的正常"最常见就是那个号的 token 未到期但已被判废。
+- 国际服账号的积分标注改成「国际服不查额度」（原「该区域积分暂不支持查询」），
+  说明白是**结构性不支持**，不是查询抖动。
+
+### Verified（2026-10-25 实测，非推测）
+- 国内服 `api.trae.cn` 通道**稳定**：`checkin_credits/status` 连续 20 次 200、
+  `ide_user_ent_usage` 连续 20 次 401（无 token 的预期响应），
+  延迟 min 171 / med 213 / p90 271 / max 312 ms；8 并发无失败、无 429。
+- 国际服 `ug-normal.trae.ai` 上这两个额度接口都是 **404** —— 国际服本就没有这套接口，
+  所以国际服账号的额度永远查不到（与 `TraeRegion.SG.isSupported = false` 一致）。
+
 ## [0.7.10] - 2026-10-17
 
 ### Fixed

@@ -233,7 +233,7 @@ object AccountCredits {
             val item = try {
                 if (!m.region.isSupported) {
                     // 国际服签到/积分协议未实测：不硬打上游，明确标注而不是显示 0
-                    Item(TRAE, m.uid, old?.remaining, false, "该区域积分暂不支持查询", old?.at ?: 0L)
+                    Item(TRAE, m.uid, old?.remaining, false, "国际服不查额度", old?.at ?: 0L)
                 } else {
                     val cred = TraeAuthStore.loadByUid(ctx, m.uid)
                     if (cred == null) {
@@ -246,7 +246,15 @@ object AccountCredits {
                         if (tok.isNullOrBlank()) {
                             Item(TRAE, m.uid, old?.remaining, false, "token 不可用", old?.at ?: 0L)
                         } else {
-                            val bal = retryFetch { TraeUpstream.fetchUsage(tok, cred.uid, m.region) }
+                            var bal = retryFetch { TraeUpstream.fetchUsage(tok, cred.uid, m.region) }
+                            if (bal == null) {
+                                // 还不行就强制续一次 token 再试：token 被提前判废（未到期但已失效）
+                                // 是"同一平台只有一个号查不到"的常见成因。
+                                val t2 = TraeAuthApi.forceRefreshTokenFor(ctx, cred)
+                                if (!t2.isNullOrBlank() && t2 != tok) {
+                                    bal = retryFetch { TraeUpstream.fetchUsage(t2, cred.uid, m.region) }
+                                }
+                            }
                             if (bal == null) {
                                 Item(TRAE, m.uid, old?.remaining, false, "查询失败", old?.at ?: 0L)
                             } else {

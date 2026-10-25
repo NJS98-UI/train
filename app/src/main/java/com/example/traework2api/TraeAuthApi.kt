@@ -290,6 +290,26 @@ object TraeAuthApi {
         return ex.accessToken
     }
 
+    /**
+     * **强制**续一次（不看是否临期）：积分查询撞到 401 时救急。
+     *
+     * 与 [restartWithValidTokenFor] 的区别：那个是"快过期才续"，这个是"已经被拒了就续"。
+     * 续不动返回 null（调用方据此把失败如实标出来，别无限重试）。
+     */
+    fun forceRefreshTokenFor(context: Context, cred: TraeAuthStore.Cred): String? {
+        if (cred.refreshToken.isBlank()) return null
+        val ex = runCatching { exchangeToken(cred.refreshToken, cred.region) }
+            .getOrElse { Log.w(TAG, "强制续期失败 ${cred.uid}: ${it.javaClass.simpleName}"); return null }
+        val newCred = cred.copy(
+            accessToken = ex.accessToken,
+            refreshToken = ex.refreshToken ?: cred.refreshToken,
+            expiresAt = ex.expiresAt ?: cred.expiresAt,
+        )
+        TraeAuthStore.updateTokens(context, newCred)
+        TraeAuthStore.updateMeta(context, newCred.toMeta())
+        return ex.accessToken
+    }
+
     private fun expiredWithin(expiresAt: Long?, skewSec: Long): Boolean {
         if (expiresAt == null || expiresAt <= 0) return true
         return System.currentTimeMillis() / 1000 + skewSec >= expiresAt
