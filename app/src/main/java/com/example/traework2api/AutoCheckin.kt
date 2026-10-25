@@ -62,9 +62,12 @@ object AutoCheckin {
     }
 
     /**
-     * 今天还没处理的账号，返回 `平台 to uid`。
+     * 今天**还没确认过**的账号，返回 `平台 to uid`。
      *
-     * 这就是"新登录的账号会不会被补签"的答案：只要它在账号表里且今天没记过，就会被列进来。
+     * 用户要求："只触发未签到的，已签到的就不触发"。
+     * 落实方式是：一旦确认"今天已签 / 无签到权限 / 已领取"就 [markDone] 落库，
+     * 于是它不会出现在这里 —— 后续任何一轮都不会再查它，**一个请求都不发**。
+     * 只有"还没确认"或"上轮失败"的账号才会被捡起来。
      */
     fun pending(ctx: Context): List<Pair<String, String>> {
         val out = ArrayList<Pair<String, String>>()
@@ -90,6 +93,14 @@ object AutoCheckin {
     fun requestRunSoon(ctx: Context) {
         prefs(ctx).edit().putLong(KEY_LAST_TRY, 0L).apply()
     }
+
+    /**
+     * 今天这个账号是否已确认处理过（已签 / 无权限 / 已领取）。
+     *
+     * 界面用它显示「已签到」而**不需要发请求** —— 打开 App、切号都不打上游。
+     */
+    fun doneToday(ctx: Context, platform: String, uid: String): Boolean =
+        runCatching { isDone(ctx, "$platform:$uid") }.getOrDefault(false)
 
     /** 今天是否**全部账号**都处理完了。 */
     fun alreadyRanToday(ctx: Context): Boolean = pending(ctx).isEmpty()
@@ -158,7 +169,7 @@ object AutoCheckin {
                     markDone(ctx, "trae:$uid")     // 已签 / 未开放 → 今天不用再管这个号
                     return@runCatching
                 }
-                val code = TraeUpstream.claimCheckin(cred.accessToken, uid, cred.region) ?: return@runCatching
+                val code = TraeUpstream.claimCheckinHealing(ctx, cred) ?: return@runCatching
                 if (code in 200..299) {
                     markDone(ctx, "trae:$uid")
                     parts.add("Trae ${traeNames[uid]?.ifBlank { null } ?: uid} 已签到")

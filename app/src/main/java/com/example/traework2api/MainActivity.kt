@@ -796,16 +796,9 @@ class MainActivity : Activity() {
             }, top(12))
         }, top(8))
 
-        // 先用缓存把数字画上（进页面立刻有数）
+        // 只用**本地缓存**画数字，**不发任何请求**（用户要求：进账号页也不许自动刷新）。
+        // 数据来源：转发后刷新的结果 + 手动点「刷新」+ 补签落库的状态。
         refreshCreditViews()
-        // **不在这里全量刷新**。以前每次渲染账号页都会把所有账号问一遍（进进出出就是几十次），
-        // 这正是把账号刷废的来源之一。现在只刷新"当前在使用的那一个"：
-        // 用户想看别的号，点账号选择里的「刷新」或切过去即可。
-        val activeForCredits = TraeAuthStore.activeUid(this@MainActivity)
-            ?: QoderAuthStore.activeUid(this@MainActivity)
-        if (activeForCredits != null) {
-            AccountCredits.refreshAll(this@MainActivity, onlyUid = activeForCredits) { refreshCreditViews() }
-        }
 
         // 登记"监测器要把哪些控件原地刷新"
         monitorApply = {
@@ -874,7 +867,8 @@ class MainActivity : Activity() {
                             danger = true,
                         ) {
                             TraeAuthStore.remove(this@MainActivity, m.uid)
-                            AccountCredits.refreshAll(this@MainActivity, force = true)
+                            // 只抹掉本地缓存，不触发刷新（删号不需要去问上游）
+                            AccountCredits.forget(this@MainActivity, AccountCredits.TRAE, m.uid)
                             pickerDialogRef?.dismiss()
                             toast("已删除")
                             render(Page.ACCOUNT)
@@ -923,7 +917,7 @@ class MainActivity : Activity() {
                             danger = true,
                         ) {
                             QoderAuthStore.remove(this@MainActivity, m.uid)
-                            AccountCredits.refreshAll(this@MainActivity, force = true)
+                            AccountCredits.forget(this@MainActivity, AccountCredits.QODER, m.uid)
                             pickerDialogRef?.dismiss()
                             toast("已删除")
                             render(Page.ACCOUNT)
@@ -1375,23 +1369,8 @@ class MainActivity : Activity() {
         qoderRemaining = null
         CreditMonitor.stale = true
         Toast.makeText(this, "已切换到 Qoder ${uid}", Toast.LENGTH_SHORT).show()
+        // 切号**不发请求**校准（用户要求），只按本地标记重画
         render(currentPage)
-        // 本地标记可能是别的设备/别的时间留下的，切号后按**服务端事实**校准一次：
-        // 否则会出现"明明领过了还显示「领取」，非要点一次才变「已领取」"。
-        syncQoderClaimState(uid)
-    }
-
-    /** 按服务端活动列表校准某个 Qoder 账号的"今日已领"标记，然后刷新页面。 */
-    private fun syncQoderClaimState(uid: String) {
-        thread(name = "qoder-claim-sync") {
-            val cred = QoderAuthStore.loadByUid(this, uid) ?: return@thread
-            val claimed = QoderAuthApi.claimedTodayFor(this, cred) ?: return@thread
-            QoderCheckin.setClaimed(this, uid, claimed)
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                if (QoderAuthStore.activeUid(this) == uid) redraw()
-            }
-        }
     }
 
     private fun confirmRemoveQoder(meta: QoderAuthStore.QMeta) {
@@ -1699,7 +1678,11 @@ class MainActivity : Activity() {
         checkinBusy -> "签到中…"
         !loggedIn -> "未登录"
         accountCheckin == null && authFailedFor(TraeAuthStore.activeUid(this)) -> "需重新登录"
-        accountCheckin == null -> "加载中…"
+        // 没主动查过就用**本地落库**的事实（补签/手动签到会写），一个请求都不发
+        accountCheckin == null -> {
+            val uid = TraeAuthStore.activeUid(this)
+            if (uid != null && AutoCheckin.doneToday(this, "trae", uid)) "已签到" else "签到"
+        }
         accountCheckin?.checkedIn == true -> "已签到"
         accountCheckin?.enable == false -> "无签到权限"
         else -> "签到"
@@ -1714,8 +1697,14 @@ class MainActivity : Activity() {
      */
     private fun refreshCheckinButton(btn: android.widget.TextView, loggedIn: Boolean) {
         val st = accountCheckin
-        val actionable = !checkinBusy && st != null && !st.checkedIn && st.enable
-        val done = st?.checkedIn == true
+        val uid = TraeAuthStore.activeUid(this)
+        val localDone = uid != null && AutoCheckin.doneToday(this, "trae", uid)
+        // 没有远端状态时按**本地落库**决定：已签就不让点，没签允许点（点了才去查/签）
+        val actionable = !checkinBusy && when {
+            st != null -> !st.checkedIn && st.enable
+            else -> uid != null && !localDone && !authFailedFor(uid)
+        }
+        val done = st?.checkedIn == true || (st == null && localDone)
         btn.text = if (done) "\u2713 " + checkinActionLabel(loggedIn) else checkinActionLabel(loggedIn)
         btn.isEnabled = actionable
         btn.alpha = 1f
@@ -2704,32 +2693,9 @@ class MainActivity : Activity() {
             Gateway.locked {
                 TraeAuthApi.restartWithValidToken(this, skewSec = SIXTY_MINUTES_SEC)
             }
-            // 切号后必须**立刻**知道这个号今天签没签。
-            // 不主动拉的话，卡片只能显示默认的「签到」，用户点一下才变成「已签到」——
-            // 每切一个号就要白点一次，显示的还不是真实状态。
-            fetchActiveCheckinStatus()
+            // 切号**不发请求**：签到状态来自本地落库（AutoCheckin 那一轮 / 手动签到）。
+            // 用户要求"切换页也不要自动刷新"，所以这里只重画，不打上游。
             runOnUiThread { redraw() }
-        }
-    }
-
-    /**
-     * 拉**当前 Trae 账号**的签到状态并落到页面上（切号 / 回前台 / 首次渲染都走它）。
-     *
-     * 只改"这个账号"的鉴权标记（按 uid），不碰别的账号 —— 见 authFailedFor。
-     */
-    private fun fetchActiveCheckinStatus() {
-        val cred = TraeAuthStore.load(this) ?: return
-        val st = TraeUpstream.fetchCheckinHealing(this, cred)
-        val failed = TraeUpstream.lastAuthFailed
-        runOnUiThread {
-            if (isFinishing || isDestroyed) return@runOnUiThread
-            if (st != null) {
-                accountCheckin = st
-                if (authFailedUid == cred.uid) authFailedUid = null
-            } else if (failed) {
-                authFailedUid = cred.uid
-            }
-            quotaApply?.invoke()
         }
     }
 
@@ -2759,15 +2725,9 @@ class MainActivity : Activity() {
         }
         // 开窗闹钟：到点自动领，不依赖用户开 App
         AutoCheckin.scheduleWindowAlarm(this)
-        // 冷启动时签到状态是空的：卡片会显示「签到」，其实今天早签过了。
-        // 这里主动拉一次（只在还没有状态时拉，回前台不重复打上游）。
-        if (accountCheckin == null && TraeAuthStore.load(this) != null) {
-            thread(name = "active-checkin-onresume") { fetchActiveCheckinStatus() }
-        }
-        // Qoder 同理：本地标记说"没领"时才去服务端核一次，领过的就不打上游了。
-        QoderAuthStore.activeUid(this)?.let { uid ->
-            if (!qoderClaimedToday(uid)) syncQoderClaimState(uid)
-        }
+        // ⚠️ 打开 App / 回前台**不拉任何上游**（用户要求）。
+        // 签到状态由 AutoCheckin 那一轮补签落库，界面只读本地结果，不额外发请求。
+        // 想看真实余额就点积分卡的「刷新」——那是唯一的手动入口。
     }
 
     override fun onPause() {

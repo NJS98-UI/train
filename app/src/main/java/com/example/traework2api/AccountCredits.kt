@@ -351,6 +351,19 @@ object AccountCredits {
         return item
     }
 
+    /**
+     * 从缓存里抹掉某个账号（删除账号时用）。
+     *
+     * **不发任何请求** —— 删除动作不需要知道别的账号还剩多少，
+     * 以前这里调全量刷新，等于"删一个号就把所有号问一遍"。
+     */
+    fun forget(ctx: Context, platform: String, uid: String) {
+        val next = LinkedHashMap(snapshot.items)
+        next.remove(key(platform, uid))
+        snapshot = snapshot.copy(items = next)
+        saveCache(ctx.applicationContext ?: ctx, snapshot)
+    }
+
     /** 清空缓存（账号全删时用，避免残留别人的积分）。 */
     fun clear(ctx: Context) {
         snapshot = Snapshot(emptyMap(), 0L, false)
