@@ -383,7 +383,7 @@ object AccountCredits {
         check(label(Item(TRAE, "x", null, false, "查询失败", 1L)) == "—（查询失败）") {
             "自检失败：从无数据时失败应显示 —（原因）"
         }
-        check(label(Item(TRAE, "x", 9.0, false, "查询失败", 1L)) == "9（查询失败）") {
+        check(label(Item(TRAE, "x", 9.0, false, "查询失败", 1L)) == "9（上次值 · 查询失败）") {
             "自检失败：有旧数据时失败应保留旧值并标原因"
         }
     }

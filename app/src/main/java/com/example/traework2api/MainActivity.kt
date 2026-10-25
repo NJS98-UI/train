@@ -205,6 +205,22 @@ class MainActivity : Activity() {
      * 外观偏好比任何控件都早一步生效：先把「亮/暗」落到 uiMode，
      * 这样 `values-night` 资源、平台对话框、光标颜色都跟着用户的选择走。
      */
+    /**
+     * 启动自检**不许崩 App**。
+     *
+     * 教训（0.7.9 与 0.7.15 各一次）：改了展示文案/纯函数，却忘了同步 `selfCheck()` 里的断言，
+     * 结果是"App 打不开、用户只看到闪退"，现场还拿不到任何日志。
+     * 自检的价值是**早发现**，不是**让用户打不开**：失败就记日志 + 界面上一句人话，功能照常跑。
+     */
+    private val selfCheckFailures = ArrayList<String>()
+
+    private fun selfCheck(name: String, block: () -> Unit) {
+        runCatching(block).onFailure {
+            android.util.Log.e("SelfCheck", "$name 自检失败: ${it.message}", it)
+            selfCheckFailures.add("$name：${it.message}")
+        }
+    }
+
     override fun attachBaseContext(newBase: Context) {
         AppStyle.init(newBase)
         super.attachBaseContext(AppStyle.applyNightOverride(newBase))
@@ -216,41 +232,41 @@ class MainActivity : Activity() {
         // （init 在 attachBaseContext 里已经调过一次，这里是幂等的二道保险。）
         AppStyle.init(this)
         AppStyle.refreshNight(this)
-        // 风格表自检：色表缺键 / 色值透明 / 对比度 < 4.5:1 都在启动时立刻炸，
-        // 而不是让用户在界面上看到"看不见的字"。
-        AppStyle.selfCheck()
+        // 风格表自检：色表缺键 / 色值透明 / 对比度 < 4.5:1 在启动时就暴露出来
+        // （记日志 + 一句提示，不崩 —— 见 selfCheck() 的注释）。
+        selfCheck("AppStyle") { AppStyle.selfCheck() }
         removeLegacyPlaintextToken()
         // 请求体按字节读的自检：中文 body 曾因按字符读而挂死，这里早失败早暴露。
-        LocalFakeServer.selfCheck()
+        selfCheck("LocalFakeServer") { LocalFakeServer.selfCheck() }
         // 区域常量自检：CN 是已实测链路，不能被后续改动弄坏。
-        TraeRegion.selfCheck()
+        selfCheck("TraeRegion") { TraeRegion.selfCheck() }
         // 多账号索引自检：uid 是主键，序列化错了会串账号。
-        TraeAuthStore.selfCheck()
+        selfCheck("TraeAuthStore") { TraeAuthStore.selfCheck() }
         // Qoder 账号索引 + OpenAPI 端点 + 积分判据自检（uid 串了会换错号）。
-        QoderAuthStore.selfCheck()
-        QoderAuthApi.selfCheck()
+        selfCheck("QoderAuthStore") { QoderAuthStore.selfCheck() }
+        selfCheck("QoderAuthApi") { QoderAuthApi.selfCheck() }
         // Qoder 定时领取：结果往返/去重聚合自检。
-        QoderCheckin.selfCheck()
+        selfCheck("QoderCheckin") { QoderCheckin.selfCheck() }
         // 备份文件（Trae+Qoder 合并）格式识别自检：认错了会把 Trae 备份喂给 Qoder 解析。
-        AccountBackup.selfCheck()
+        selfCheck("AccountBackup") { AccountBackup.selfCheck() }
         // 积分监测换号阈值边界自检。
-        CreditMonitor.selfCheck()
+        selfCheck("CreditMonitor") { CreditMonitor.selfCheck() }
         // 续期判定边界自检：服务现在每个请求都靠它决定要不要续期，判错就是持续 401。
-        TraeAuthApi.selfCheck()
+        selfCheck("TraeAuthApi") { TraeAuthApi.selfCheck() }
         // 国际服 plan_item 累积快照 → 增量的 diff 自检（错则客户端看到内容重复）
-        TraeIntlUpstream.selfCheck()
+        selfCheck("TraeIntlUpstream") { TraeIntlUpstream.selfCheck() }
         // 上游模型表解析自检：空 config_name 必须跳过、非聊天项必须过滤、name/context 回落规则
         // （解析错会让"刷新模型"把好好的清单覆盖成垃圾）。
-        TraeUpstream.selfCheck()
+        selfCheck("TraeUpstream") { TraeUpstream.selfCheck() }
         // 模型表自检：空表绝不允许生效 —— 那会让所有客户端看不到任何模型（本任务最贵的失败面）。
-        ModelsRepo.selfCheck()
+        selfCheck("ModelsRepo") { ModelsRepo.selfCheck() }
         // COSY 签名原语自检：编码/换行/填充/UUID 掩码/RSA 长度错一个都只会得到 401，
         // 且上游不告诉你哪步错 —— 必须在本地就钉死。
-        QoderCosyCrypto.selfCheck()
+        selfCheck("QoderCosyCrypto") { QoderCosyCrypto.selfCheck() }
         // Qoder 模型目录 + 解析器自检：模型名解析错会把请求路由到错的 key。
-        QoderModelCatalog.selfCheck()
+        selfCheck("QoderModelCatalog") { QoderModelCatalog.selfCheck() }
         // Qoder 上游请求体自检：system 抽取、tool_calls 的 content、cache 标记、参数透传。
-        QoderUpstream.selfCheck()
+        selfCheck("QoderUpstream") { QoderUpstream.selfCheck() }
         // 装入磁盘模型缓存（必须在 selfCheck 之后、任何 /v1/models 请求之前）：
         // 客户端在 App 刚重启、还没手动刷模型时也能拉到上次刷到的清单。
         ModelsRepo.init(this)
@@ -264,21 +280,25 @@ class MainActivity : Activity() {
         // （例：手动选了国服、当前账号却是国际服）→ 必须以账号为准。
         TraeAuthStore.syncRegionToActiveAccount(this)
         // 本地 API Key 稳定性自检：key 一旦"每次取值都变"，所有已配置的客户端全 401。
-        Gateway.selfCheck(this)
+        selfCheck("Gateway") { Gateway.selfCheck(this) }
         // 后端选择自检：auto 在"只登 Qoder"时必须解析成 Qoder，否则聊天会拿空 Trae 凭证。
         // 必须放在区域恢复之后：TraeAuthStore.load 的结果参与 auto 判定。
-        GatewayBackend.selfCheck(this)
+        selfCheck("GatewayBackend") { GatewayBackend.selfCheck(this) }
         // 按账号积分的展示规则自检（合计只加查到的、失败要暴露成下界、null ≠ 0）。
-        AccountCredits.selfCheck()
+        selfCheck("AccountCredits") { AccountCredits.selfCheck() }
         // CLI 模型缓存解密自检（HKDF-SHA256 对齐 RFC 5869 + AES-GCM 往返 + 错 uid 必须解不开）。
-        QoderModelCache.selfCheck()
+        selfCheck("QoderModelCache") { QoderModelCache.selfCheck() }
         // 装入按账号积分缓存：进账号页立刻有数，后台刷新再原地更新。
         AccountCredits.loadCache(this)
         // 启动补签的日期闸门自检（写错就变成"每次前台都签"，会一直打上游）。
-        AutoCheckin.selfCheck()
-        QoderMachine.selfCheck()
+        selfCheck("AutoCheckin") { AutoCheckin.selfCheck() }
+        selfCheck("QoderMachine") { QoderMachine.selfCheck() }
         // 保活页的 ROM 识别自检：SystemProperties 是隐藏 API（靠反射），读不到也不能崩。
-        KeepAlive.selfCheck()
+        selfCheck("KeepAlive") { KeepAlive.selfCheck() }
+
+        if (selfCheckFailures.isNotEmpty()) {
+            toast("自检警告（不影响使用）：${selfCheckFailures.first()}")
+        }
 
         // 网关由 Gateway（业务）+ GatewayService（保活）持有，**Activity 不再拥有它**：
         // 这样 Activity 被销毁时端口不会跟着断，用户才能"网关开着、切到别的客户端用"。
