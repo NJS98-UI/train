@@ -54,7 +54,7 @@ object Gateway {
         if (isRunning) return
         val app = ctx.applicationContext
         val s = LocalFakeServer(apiKey(app))
-        s.usageRecorder = { model, usage, ms, ok, err ->
+        s.usageRecorder = { model, usage, ms, ok, err, backend ->
             UsageStore.record(app, model,
                 usage?.optInt("prompt_tokens", 0) ?: 0,
                 usage?.optInt("completion_tokens", 0) ?: 0,
@@ -62,7 +62,7 @@ object Gateway {
                 ms, ok, err ?: "")
             // 「只在转发的时候加载正在使用的」：每次转发后顺手刷新当前账号额度（内部节流 60s），
             // 不再有定时轮询 —— 那是把账号拿去刷接口，token 会被判废。
-            CreditMonitor.noteForwarded(app)
+            CreditMonitor.noteForwarded(app, backend)
         }
         // 每次转发前取「当下有效」的凭证（必要时续期）。服务是长驻的、token 会过期，
         // 不能只在启动/登录/切账号时推一次快照（那样跑够 14 天后全是 401）。
@@ -127,9 +127,12 @@ object Gateway {
         server = s
         s.start()
         android.util.Log.i(TAG, "网关已启动，端口 ${LocalFakeServer.PORT}")
-        // 服务在跑 = 用户在用额度 → 拉起积分监测（每 2s 查当前账号积分，用完自动换号）。
-        // 与网关同生命周期：网关停了就没人消耗额度，监测也该停（省电/省上游请求）。
-        CreditMonitor.start(app)
+        // **不**在这里拉积分监测。
+        //
+        // 以前服务一启动就起一个每 2 秒轮询的线程 —— 服务是长驻的，于是没有请求时也一直打上游，
+        // 一天上万次，账号的 token 会被上游判废。用户的要求是"没有请求模型的时候就停止扫描"，
+        // 所以现在唯一的触发点是转发完成后的 [CreditMonitor.noteForwarded]（只查刚用到的那个账号）。
+        // 用户若在界面上手动把检测间隔调成 > 0，由 MainActivity.onResume 起线程。
     }
 
     /** 幂等停止：没启动时调用也安全（用户可能没开就退出）。 */

@@ -749,11 +749,14 @@ class MainActivity : Activity() {
                 addView(chipInfo(if (interval == 0) "已暂停" else "$interval 秒"))
             }, top(18))
             val seek = SeekBar(this@MainActivity).apply {
+                // 步进 10 秒：1~9 秒会被 setIntervalSec 抬到 10，滑块位置和实际值就对不上了。
+                // 上限 60 秒 × 10 = 600 秒。
                 max = 60
-                progress = interval
+                progress = (interval / 10).coerceIn(0, 60)
                 setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                     override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
-                        if (fromUser) CreditMonitor.setIntervalSec(this@MainActivity, value)
+                        // 0 = 停止扫描；其余按 10 秒一档（10s ~ 600s）
+                        if (fromUser) CreditMonitor.setIntervalSec(this@MainActivity, value * 10)
                     }
                     override fun onStartTrackingTouch(sb: SeekBar?) {}
                     override fun onStopTrackingTouch(sb: SeekBar?) { render(currentPage) }
@@ -761,8 +764,8 @@ class MainActivity : Activity() {
             }
             addView(seek, top(6))
             addView(row {
-                addView(caption("0 = 不自动查（只在你用的时候刷新）"), weighted())
-                addView(caption("60 秒"))
+                addView(caption("0 = 不自动查（只用的时候刷新）"), weighted())
+                addView(caption("600 秒"))
             }, top(2))
         }, top(8))
 
@@ -2738,12 +2741,16 @@ class MainActivity : Activity() {
         super.onResume()
         // 有任一账号（Trae 或 Qoder）就把积分监测拉起来，账号页才能"每 2 秒"看到活的积分/自动换号。
         // 与网关启动时拉起的那次幂等（CreditMonitor.start 内部已挡重复启动）。
-        // 默认**不轮询**（间隔 0）：只在转发时刷新当前账号，见 CreditMonitor.noteForwarded。
-        // 用户自己在界面上把间隔调大才起这条线程 —— 否则白占一个后台线程。
+        // 默认**完全不轮询**（间隔 0）：只在转发时刷新刚用到的那个账号，
+        // 见 CreditMonitor.noteForwarded。"没有请求模型的时候就停止扫描"。
+        // 只有用户自己在界面上把间隔调成 > 0 才起这条线程。
         if (CreditMonitor.intervalSec(this) > 0 &&
             (TraeAuthStore.activeUid(this) != null || QoderAuthStore.activeUid(this) != null)
         ) {
             CreditMonitor.start(this)
+        } else {
+            // 用户把间隔调回 0（或本来就没开）→ 确保后台线程真的停了
+            CreditMonitor.stop()
         }
         CreditMonitor.listener = CreditMonitor.Listener { s -> applyMonitorSnapshot(s) }
         // 进页面先回填上一次快照，避免要等最多 2 秒才出数。

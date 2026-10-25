@@ -89,7 +89,13 @@ object CreditMonitor {
     // ---- 开关 ----
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun isAutoSwitchEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_AUTO, true)
+    /**
+     * 自动换号默认 **关**。
+     *
+     * 开启时一旦余额见底就会**遍历其它所有账号**逐一查积分 —— 号越多，上游请求越多，
+     * 正是"账号被刷废"的来源之一。要用再手动打开（界面上有开关）。
+     */
+    fun isAutoSwitchEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_AUTO, false)
     fun setAutoSwitchEnabled(ctx: Context, v: Boolean) {
         prefs(ctx).edit().putBoolean(KEY_AUTO, v).apply(); stale = true
     }
@@ -125,12 +131,16 @@ object CreditMonitor {
     fun currentSnapshot(): Snapshot? = latest
 
     /**
-     * 转发完成后调用：刷新**当前账号**额度（节流 [FORWARD_POLL_MIN_MS]）。
+     * 转发完成后调用：刷新**刚刚被使用的那个平台、那个账号**的额度。
      *
-     * 这就是"只在转发时加载正在用的账号"：不打定时轮询，也不遍历其它账号
-     * （除非余额见底需要换号，那条路另有 5 分钟扫描缓存）。
+     * 用户的规则，逐字落实：
+     *  - "一下用 trae，它就只扫描 Trae 当前账号" → [backend] = trae 时只查 Trae 当前号
+     *  - "如果我用的是 qoder，那就只扫描这一个" → [backend] = qoder 时只查 Qoder 当前号
+     *  - "没有请求模型的时候就停止扫描" → 本函数只由转发完成回调触发，没有定时线程
+     *
+     * 不用定时轮询：那是拿账号去刷上游接口，token 会被判废（见 DEFAULT_INTERVAL_SEC 注释）。
      */
-    fun noteForwarded(context: Context) {
+    fun noteForwarded(context: Context, backend: String) {
         val now = System.currentTimeMillis()
         if (now - lastForwardPollAt < FORWARD_POLL_MIN_MS) return
         lastForwardPollAt = now
@@ -138,8 +148,15 @@ object CreditMonitor {
         appCtx = app
         Thread({
             runCatching {
-                val (traeUid, traeBal) = pollTrae(app)
-                val snap = Snapshot(traeUid, traeBal, null, null, isAutoSwitchEnabled(app), threshold(app))
+                val snap = if (backend == GatewayBackend.QODER) {
+                    // 只查 Qoder 当前账号，Trae 完全不碰
+                    val (uid, remaining) = pollQoder(app)
+                    Snapshot(null, null, uid, remaining, isAutoSwitchEnabled(app), threshold(app))
+                } else {
+                    // 只查 Trae 当前账号，Qoder 完全不碰
+                    val (uid, bal) = pollTrae(app)
+                    Snapshot(uid, bal, null, null, isAutoSwitchEnabled(app), threshold(app))
+                }
                 latest = snap
                 stale = false
                 listener?.let { l -> main.post { l.onSnapshot(snap) } }
