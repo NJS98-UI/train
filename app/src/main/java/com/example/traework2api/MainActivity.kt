@@ -160,8 +160,21 @@ class MainActivity : Activity() {
     /** 账号选择弹窗最多露出几行，超出滚动。 */
     private val PICKER_VISIBLE_ROWS = 5
 
-    /** 签到状态查不到且原因是鉴权失败（token 被判废）。 */
-    private var checkinAuthFailed = false
+    /**
+     * 「这个账号被服务端拒了」按 **uid** 记，不按页面记。
+     *
+     * 之前是一个全局 boolean：切到坏账号 → 置 true → 再切回好账号，**没人清它**，
+     * 于是好账号也显示「需重新登录」。状态必须跟着账号走，不能跟着页面走。
+     */
+    private var authFailedUid: String? = null
+
+    /** 该账号是否已被服务端拒绝（本页实测 + 积分条目两个来源，都按 uid 查）。 */
+    private fun authFailedFor(uid: String?): Boolean {
+        if (uid.isNullOrBlank()) return false
+        if (authFailedUid == uid) return true
+        // 积分条目本来就是按 uid 存的，弹窗里显示的也是它 —— 两处必须同源，否则又对不上
+        return AccountCredits.current().trae(uid)?.error == "需重新登录"
+    }
     /** 待写入 SAF 的备份 JSON（导出账号点「保存」后暂存，onActivityResult 拿到 Uri 再落盘）。 */
     private var pendingExportJson: String? = null
     /** 当前 Qoder 账号积分余量（监测器回填，仅展示）。null=未拉到/无账号。 */
@@ -620,7 +633,7 @@ class MainActivity : Activity() {
                 if (traeCred != null) {
                     addView(labelValue("区域", regionLabelFull(traeCred.region)), top(10))
                     addView(labelValue("UID", traeCred.uid), top(4))
-                    addView(labelValue("Token", tokenRenewLabel(traeCred.expiresAt)), top(4))
+                    addView(labelValue("Token", tokenRenewLabel(traeCred.uid, traeCred.expiresAt)), top(4))
                     addView(creditLabel(AccountCredits.TRAE, traeCred.uid), top(6))
                     // 卡上直接签到：不用滚到页面底部的一键签到
                     addView(row(8) {
@@ -1670,7 +1683,7 @@ class MainActivity : Activity() {
         // 一套词，四处（卡片/弹窗/一键签到结果）都用它，别再各写各的
         checkinBusy -> "签到中…"
         !loggedIn -> "未登录"
-        accountCheckin == null && checkinAuthFailed -> "需重新登录"
+        accountCheckin == null && authFailedFor(TraeAuthStore.activeUid(this)) -> "需重新登录"
         accountCheckin == null -> "加载中…"
         accountCheckin?.checkedIn == true -> "已签到"
         accountCheckin?.enable == false -> "无签到权限"
@@ -1747,13 +1760,15 @@ class MainActivity : Activity() {
     private fun invalidateAccountQuota() {
         accountBalance = null
         accountCheckin = null
+        // 注意：**不清 authFailedUid** —— 它按 uid 记，是"那个账号的事实"，
+        // 切走再切回来仍应保留（否则要重新撞一次 401 才知道）。
     }
 
     /** Token 是否需要续期：过期则需重新登录，临近则由后台自动用 refresh 续期。 */
-    private fun tokenRenewLabel(expiresAt: Long): String {
+    private fun tokenRenewLabel(uid: String, expiresAt: Long): String {
         // 只看到期时间会说谎：token 可能"没过期但已被服务端拒绝"。
-        // 有实测证据（查额度/签到撞 401/1001）时以证据为准。
-        if (checkinAuthFailed) return "需重新登录"
+        // 有实测证据（查额度/签到撞 401/1001）时以证据为准 —— 但证据必须是**这个账号**的。
+        if (authFailedFor(uid)) return "需重新登录"
         if (expiresAt <= 0L) return "未知（无到期信息）"
         val remainSec = expiresAt - System.currentTimeMillis() / 1000
         return if (remainSec <= 0) "已过期 · 需重新登录"
@@ -2429,8 +2444,12 @@ class MainActivity : Activity() {
                 // 积分/签到状态擦回「—」是净损失，用户会以为数据丢了。
                 accountBalance = u ?: accountBalance
                 accountCheckin = c ?: accountCheckin
-                // 查不到且是鉴权问题 → 界面说"token 失效"，别含糊成"加载中/未开放"
-                if (c == null) checkinAuthFailed = TraeUpstream.lastAuthFailed
+                // 按**这个账号**记：成功就清掉它的标记，失败且是鉴权问题才置上
+                if (c != null) {
+                    if (authFailedUid == cred.uid) authFailedUid = null
+                } else if (TraeUpstream.lastAuthFailed) {
+                    authFailedUid = cred.uid
+                }
                 quotaLoading = false
                 toast(if (u == null) "未获取到额度" else "已更新")
                 quotaApply?.invoke()
