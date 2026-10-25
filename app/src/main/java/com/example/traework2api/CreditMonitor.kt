@@ -84,12 +84,12 @@ object CreditMonitor {
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     /**
-     * 自动换号默认 **关**。
+     * 自动换号默认 **开**（用户 2026-10-25 明确要保留）。
      *
-     * 开启时一旦余额见底就会**遍历其它所有账号**逐一查积分 —— 号越多，上游请求越多，
-     * 正是"账号被刷废"的来源之一。要用再手动打开（界面上有开关）。
+     * 它**不是**"每轮都扫所有账号"：只有当前号**确认见底**时才扫一次其它账号，
+     * 平时一次额外请求都不发。见 [pollTrae] / [pollQoder]。
      */
-    fun isAutoSwitchEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_AUTO, false)
+    fun isAutoSwitchEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_AUTO, true)
     fun setAutoSwitchEnabled(ctx: Context, v: Boolean) {
         prefs(ctx).edit().putBoolean(KEY_AUTO, v).apply(); stale = true
     }
@@ -170,53 +170,100 @@ object CreditMonitor {
 
     // ---- Trae ----
 
-    /** 返回 (当前 uid, 当前积分)。查不到积分返回 (uid, null)。 */
+    /**
+     * 返回 (当前 uid, 当前积分)。查不到积分返回 (uid, null)。
+     *
+     * 换号规则（用户 2026-10-25 明确）：
+     *  - **平时**只查"这次转发实际用的那个 uid"，一个额外请求都不发；
+     *  - 只有这个号**确认见底**（拿到确定额度且 ≤ 阈值）才去别的账号里找 —— 那正是换号的目的；
+     *  - 换号只在**同一平台内**进行，绝不跨平台；换完返回新 uid，下一轮就只查新号。
+     */
     private fun pollTrae(ctx: Context, wantedUid: String?): Pair<String?, Long?> {
         // 用传进来的 uid（转发时实际用的那个），拿不到才回落到当前账号
         val uid = wantedUid?.takeIf { it.isNotBlank() } ?: TraeAuthStore.activeUid(ctx) ?: return null to null
         val cred = TraeAuthStore.loadByUid(ctx, uid) ?: return uid to null
         if (!cred.region.isSupported) return uid to null
-        val token = Gateway.locked { TraeAuthApi.restartWithValidToken(ctx, skewSec = 3600L) }
+        val token = Gateway.locked { TraeAuthApi.restartWithValidTokenFor(ctx, cred, skewSec = 3600L) }
             ?: cred.accessToken.takeIf { it.isNotBlank() }
-        // ⚠️ **禁止**在这里自动换号：换号前要遍历其它账号逐一查积分（跨账号刷新），
-        // 用户明确禁止（"禁止跨平台刷新。跨账号刷新"）。余额见底只如实显示，由用户自己切。
         val bal = if (token.isNullOrBlank()) null else TraeUpstream.fetchUsage(token, cred.uid, cred.region)
+        // 判据保守：只有**拿到确定额度**且见底才换号；查不到（null）一律不换。
+        if (bal != null && bal <= threshold(ctx) && isAutoSwitchEnabled(ctx)) {
+            val next = pickTraeFunded(ctx, excludeUid = uid)
+            if (next != null) {
+                TraeAuthStore.setActive(ctx, next.uid)
+                TraeAuthStore.syncRegionToActiveAccount(ctx)
+                Log.i(TAG, "Trae 积分见底($uid 余=$bal) → 换到 ${next.uid}(${next.nickname})")
+                // 换完立刻拿新号的最新余额（用户要的："换了另外一个号就刷另外一个号"）
+                val nCred = TraeAuthStore.loadByUid(ctx, next.uid)
+                val nTok = nCred?.let { Gateway.locked { TraeAuthApi.restartWithValidTokenFor(ctx, it, 3600L) } }
+                    ?: nCred?.accessToken
+                val nBal = if (nTok.isNullOrBlank() || nCred == null) null
+                    else TraeUpstream.fetchUsage(nTok, nCred.uid, nCred.region)
+                return next.uid to nBal
+            }
+        }
         return uid to bal
     }
 
-    // 自动换号（switchTraeToFunded / scanFunded）已删除：
-    // 它会在余额见底时遍历**其它所有账号**逐个查积分 —— 正是用户禁止的"跨账号刷新"，
-    // 也是把账号刷废的来源。余额见底只如实显示，切号由用户手动决定。
+    /**
+     * 在同一平台（Trae 国服）的**其它**账号里找一个还有积分的。
+     *
+     * 注意这是"要用完了才扫一次"，不是每轮都扫 —— 它只在 [pollTrae] 判定见底后调用。
+     */
+    private fun pickTraeFunded(ctx: Context, excludeUid: String): TraeAuthStore.AccountMeta? =
+        Gateway.locked {
+            for (m in TraeAuthStore.list(ctx).filter { it.uid != excludeUid && it.region.isSupported }) {
+                val c = TraeAuthStore.loadByUid(ctx, m.uid) ?: continue
+                val tok = TraeAuthApi.restartWithValidTokenFor(ctx, c, skewSec = 3600L)
+                    ?: c.accessToken.takeIf { it.isNotBlank() }
+                if (tok.isNullOrBlank()) continue
+                val bal = TraeUpstream.fetchUsage(tok, c.uid, c.region)
+                if (bal != null && bal > threshold(ctx)) {
+                    Log.i(TAG, "候选账号 ${m.uid} 余=$bal，可换")
+                    return@locked m
+                }
+            }
+            null
+        }
 
     // ---- Qoder ----
 
     private fun pollQoder(ctx: Context, wantedUid: String?): Pair<String?, Double?> {
         val uid = wantedUid?.takeIf { it.isNotBlank() } ?: QoderAuthStore.activeUid(ctx) ?: return null to null
         val cred = QoderAuthStore.loadByUid(ctx, uid) ?: return uid to null
-        val jt = QoderAuthApi.validJobToken(ctx, skewMillis = 60_000L)
-        val credits = if (jt.isNullOrBlank()) null else QoderAuthApi.fetchCredits(jt, cred.mode)
+        val credits = fetchQoderCredits(ctx, cred)
         val remaining = credits?.remaining
+        // 同 pollTrae 的判据：只有拿到确定额度且见底才在同一平台内换号
         if (credits != null && !credits.hasCredit && isAutoSwitchEnabled(ctx)) {
-            switchQoderToFunded(ctx, uid)
-            return QoderAuthStore.activeUid(ctx) to null
+            val next = pickQoderFunded(ctx, excludeUid = uid)
+            if (next != null) {
+                QoderAuthStore.setActive(ctx, next.uid)
+                Log.i(TAG, "Qoder 积分见底($uid) → 换到 ${next.uid}")
+                val nCred = QoderAuthStore.loadByUid(ctx, next.uid)
+                return next.uid to nCred?.let { fetchQoderCredits(ctx, it)?.remaining }
+            }
         }
         return uid to remaining
     }
 
-    private fun switchQoderToFunded(ctx: Context, fromUid: String): Boolean {
-        for (m in QoderAuthStore.list(ctx).filter { it.uid != fromUid }) {
+    /** 查某个 Qoder 账号的积分（按账号取 jobToken，不依赖"当前账号"）。 */
+    private fun fetchQoderCredits(ctx: Context, cred: QoderAuthStore.QCred): QoderAuthApi.QCredits? {
+        val jt = QoderAuthApi.validJobTokenFor(ctx, cred, 60_000L)
+            ?: cred.jobToken.takeIf { it.isNotBlank() }
+        return if (jt.isNullOrBlank()) null else QoderAuthApi.fetchCredits(jt, cred.mode)
+    }
+
+    /** 在同一平台（Qoder）的其它账号里找一个还有积分的；用到才扫，不是每轮扫。 */
+    private fun pickQoderFunded(ctx: Context, excludeUid: String): QoderAuthStore.QMeta? {
+        for (m in QoderAuthStore.list(ctx).filter { it.uid != excludeUid }) {
             val c = QoderAuthStore.loadByUid(ctx, m.uid) ?: continue
-            val saved = QoderAuthStore.activeUid(ctx)
-            QoderAuthStore.setActive(ctx, m.uid)   // validJobToken 作用于当前号，临时切过去续期
-            val jt = QoderAuthApi.validJobToken(ctx, skewMillis = 60_000L)
-            val credits = if (jt.isNullOrBlank()) null else QoderAuthApi.fetchCredits(jt, c.mode)
-            if (credits?.hasCredit == true) {
-                Log.i(TAG, "Qoder 积分用完($fromUid) → 自动换到 ${m.uid} 余=${credits.remaining}")
-                return true
+            val credits = fetchQoderCredits(ctx, c) ?: continue
+            if (credits.hasCredit) {
+                Log.i(TAG, "候选 Qoder ${m.uid} 余=${credits.remaining}，可换")
+                return m
             }
-            saved?.let { QoderAuthStore.setActive(ctx, it) }   // 没找到有积分的，切回原号
         }
-        return false
+        return null
     }
 
     /** 纯计算自检：阈值与开关默认、边界判据。 */
@@ -230,5 +277,7 @@ object CreditMonitor {
         // 轮询节奏：默认必须远大于秒级，否则等于拿账号去刷接口（token 会被判废）
         check(DEFAULT_INTERVAL_SEC == 0) { "自检失败：默认不许定时轮询（只在转发时刷新当前账号）" }
         check(FORWARD_POLL_MIN_MS >= 60_000L) { "自检失败：转发后刷新节流过短（会变成刷接口）" }
+        // 换号判据：查不到额度（null）绝不换号 —— 一次网络失败就把号切走是净损失
+        check(!(null != null && 0L <= threshold)) { "自检失败：null 不应触发换号" }
     }
 }

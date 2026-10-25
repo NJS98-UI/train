@@ -727,8 +727,36 @@ class MainActivity : Activity() {
             })
         }
 
-        // 「积分检测」整块已删除：定时轮询会拿账号去刷上游接口（token 会被判废）。
-        // 现在只在**请求转发时**刷新刚用到的那个平台的那个账号，没有任何定时扫描。
+        // ---- 自动换号（可选）：当前号用完时在同一平台内换到还有积分的号 ----
+        //
+        // 注意这里**没有检测间隔**：定时轮询已彻底删除（会拿账号去刷上游接口）。
+        // 换号判定只发生在"转发之后刷新当前账号"那一刻，不额外增加请求。
+        addView(section("自动换号"))
+        addView(card {
+            val auto = CreditMonitor.isAutoSwitchEnabled(this@MainActivity)
+            val cur = CreditMonitor.threshold(this@MainActivity)
+            addView(row {
+                addView(text("当前号用完就换", FS_VALUE, true), weighted())
+                addView(action(if (auto) "已开启" else "已关闭", outlined = !auto) {
+                    CreditMonitor.setAutoSwitchEnabled(this@MainActivity, !auto)
+                    toast(if (!auto) "已开启自动换号" else "已关闭自动换号")
+                    render(currentPage)
+                })
+            })
+            addView(row {
+                addView(text("换号阈值", FS_VALUE, true), weighted())
+                addView(chipInfo("≤ $cur"))
+            }, top(12))
+            addView(row(8) {
+                listOf(5L, 10L, 15L, 20L).forEachIndexed { i, v ->
+                    addView(action("$v", outlined = cur != v) {
+                        CreditMonitor.setThreshold(this@MainActivity, v)
+                        render(currentPage)
+                    }, weighted(start = if (i == 0) 0 else 8))
+                }
+            }, top(10))
+            addView(caption("只在同一个平台内换号；换完立刻刷新新号的余额。不做定时检测。"), top(8))
+        }, top(8))
 
         // ---- 账户导出：只留导出 / 导入 ----
         addView(section("账户导出"))
