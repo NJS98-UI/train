@@ -575,6 +575,25 @@ object QoderAuthApi {
     }
 
     /** 领取编排：取有效 jt → 列活动 → 领 CLAIMABLE 的 → 汇总。失败不抛（一人失败不拖垮整批）。 */
+    /**
+     * **只读**查这个账号今天领没领（不发 claim、不改任何状态）。
+     *
+     * 为什么需要：切号后卡片上的按钮如果只信本地记录，就会出现
+     * "明明领过了还显示「领取」，非要点一次才变「已领取」"。
+     *
+     * 返回：true=已领完 / false=还有可领 / null=查不到（token 或网络问题，别据此改显示）。
+     */
+    fun claimedTodayFor(context: Context, cred: QoderAuthStore.QCred): Boolean? {
+        val jt = validJobTokenFor(context, cred, skewMillis = 60_000L) ?: return null
+        val identity = if (cred.mode == MODE_GLOBAL) {
+            QoderMachine.identity(context, QoderAuthStore.fingerprint(context, cred.uid))
+        } else null
+        val campaigns = runCatching { fetchCampaigns(jt, cred.mode, identity) }.getOrNull() ?: return null
+        if (campaigns.isEmpty()) return null
+        if (campaigns.any { it.claimable }) return false
+        return if (campaigns.any { it.claimStatus.equals("CLAIMED", ignoreCase = true) }) true else null
+    }
+
     private fun claimDailyForCred(context: Context, cred: QoderAuthStore.QCred): QClaimResult {
         // 国际/国内同走干净链路（不带 Cosy-Machine* 头）。桌面端专属「每天领 100 Credits」
         // 活动在没有原生指纹时服务端会正常缺席，但其它通用活动仍可领；无需再对国际版硬挡 unsupported。

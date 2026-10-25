@@ -240,6 +240,15 @@ object QoderCheckin {
     }
 
     /** 这个账号今天领到过没有（账号卡按钮据此显示「领取 / 已领取」）。 */
+    /** 按服务端事实改写本地标记（切号后校准用）。 */
+    fun setClaimed(ctx: Context, uid: String, claimed: Boolean) {
+        runCatching {
+            val o = JSONObject(prefs(ctx).getString(KEY_CLAIMED, null) ?: "{}")
+            if (claimed) o.put(uid, today()) else o.remove(uid)
+            prefs(ctx).edit().putString(KEY_CLAIMED, o.toString()).apply()
+        }
+    }
+
     fun claimedToday(ctx: Context, uid: String): Boolean = runCatching {
         JSONObject(prefs(ctx).getString(KEY_CLAIMED, "{}") ?: "{}").optString(uid, "") == today()
     }.getOrDefault(false)

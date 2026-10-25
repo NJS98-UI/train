@@ -8,6 +8,17 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.20] - 2026-10-17
+
+### Fixed（切号后状态显示不准，两个平台）
+- **Trae**：切号后卡片签到按钮只显示默认「签到」，必须点一次才知道「已签到」。
+  根因是切号只刷新 token、**从不拉签到状态**。新增 `fetchActiveCheckinStatus()`：
+  切号后立刻拉一次状态并落到页面；冷启动（`onResume` 且状态为空）也拉一次。
+- **Qoder**：同理，按钮只信本地 `qoder_claimed` 标记，别的设备领过 / 换号后不准。
+  新增 `QoderAuthApi.claimedTodayFor()`（**只读**：查活动列表，不发 claim），
+  切号后按服务端事实校准本地标记（`QoderCheckin.setClaimed`）；
+  `onResume` 时仅在"本地说没领"才去核一次，领过的不重复打上游。
+
 ## [0.7.19] - 2026-10-17
 
 ### Fixed

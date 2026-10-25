@@ -1377,6 +1377,22 @@ class MainActivity : Activity() {
         CreditMonitor.stale = true
         Toast.makeText(this, "已切换到 Qoder ${uid}", Toast.LENGTH_SHORT).show()
         render(currentPage)
+        // 本地标记可能是别的设备/别的时间留下的，切号后按**服务端事实**校准一次：
+        // 否则会出现"明明领过了还显示「领取」，非要点一次才变「已领取」"。
+        syncQoderClaimState(uid)
+    }
+
+    /** 按服务端活动列表校准某个 Qoder 账号的"今日已领"标记，然后刷新页面。 */
+    private fun syncQoderClaimState(uid: String) {
+        thread(name = "qoder-claim-sync") {
+            val cred = QoderAuthStore.loadByUid(this, uid) ?: return@thread
+            val claimed = QoderAuthApi.claimedTodayFor(this, cred) ?: return@thread
+            QoderCheckin.setClaimed(this, uid, claimed)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (QoderAuthStore.activeUid(this) == uid) redraw()
+            }
+        }
     }
 
     private fun confirmRemoveQoder(meta: QoderAuthStore.QMeta) {
@@ -2689,7 +2705,32 @@ class MainActivity : Activity() {
             Gateway.locked {
                 TraeAuthApi.restartWithValidToken(this, skewSec = SIXTY_MINUTES_SEC)
             }
+            // 切号后必须**立刻**知道这个号今天签没签。
+            // 不主动拉的话，卡片只能显示默认的「签到」，用户点一下才变成「已签到」——
+            // 每切一个号就要白点一次，显示的还不是真实状态。
+            fetchActiveCheckinStatus()
             runOnUiThread { redraw() }
+        }
+    }
+
+    /**
+     * 拉**当前 Trae 账号**的签到状态并落到页面上（切号 / 回前台 / 首次渲染都走它）。
+     *
+     * 只改"这个账号"的鉴权标记（按 uid），不碰别的账号 —— 见 authFailedFor。
+     */
+    private fun fetchActiveCheckinStatus() {
+        val cred = TraeAuthStore.load(this) ?: return
+        val st = TraeUpstream.fetchCheckinHealing(this, cred)
+        val failed = TraeUpstream.lastAuthFailed
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            if (st != null) {
+                accountCheckin = st
+                if (authFailedUid == cred.uid) authFailedUid = null
+            } else if (failed) {
+                authFailedUid = cred.uid
+            }
+            quotaApply?.invoke()
         }
     }
 
@@ -2719,6 +2760,15 @@ class MainActivity : Activity() {
         }
         // 开窗闹钟：到点自动领，不依赖用户开 App
         AutoCheckin.scheduleWindowAlarm(this)
+        // 冷启动时签到状态是空的：卡片会显示「签到」，其实今天早签过了。
+        // 这里主动拉一次（只在还没有状态时拉，回前台不重复打上游）。
+        if (accountCheckin == null && TraeAuthStore.load(this) != null) {
+            thread(name = "active-checkin-onresume") { fetchActiveCheckinStatus() }
+        }
+        // Qoder 同理：本地标记说"没领"时才去服务端核一次，领过的就不打上游了。
+        QoderAuthStore.activeUid(this)?.let { uid ->
+            if (!qoderClaimedToday(uid)) syncQoderClaimState(uid)
+        }
     }
 
     override fun onPause() {
