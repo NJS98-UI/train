@@ -761,8 +761,8 @@ class MainActivity : Activity() {
             }
             addView(seek, top(6))
             addView(row {
-                addView(caption("0"), weighted())
-                addView(caption("60"))
+                addView(caption("0 = 不自动查（只在你用的时候刷新）"), weighted())
+                addView(caption("60 秒"))
             }, top(2))
         }, top(8))
 
@@ -2738,7 +2738,11 @@ class MainActivity : Activity() {
         super.onResume()
         // 有任一账号（Trae 或 Qoder）就把积分监测拉起来，账号页才能"每 2 秒"看到活的积分/自动换号。
         // 与网关启动时拉起的那次幂等（CreditMonitor.start 内部已挡重复启动）。
-        if (TraeAuthStore.activeUid(this) != null || QoderAuthStore.activeUid(this) != null) {
+        // 默认**不轮询**（间隔 0）：只在转发时刷新当前账号，见 CreditMonitor.noteForwarded。
+        // 用户自己在界面上把间隔调大才起这条线程 —— 否则白占一个后台线程。
+        if (CreditMonitor.intervalSec(this) > 0 &&
+            (TraeAuthStore.activeUid(this) != null || QoderAuthStore.activeUid(this) != null)
+        ) {
             CreditMonitor.start(this)
         }
         CreditMonitor.listener = CreditMonitor.Listener { s -> applyMonitorSnapshot(s) }
