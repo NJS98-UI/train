@@ -54,7 +54,7 @@ object Gateway {
         if (isRunning) return
         val app = ctx.applicationContext
         val s = LocalFakeServer(apiKey(app))
-        s.usageRecorder = { model, usage, ms, ok, err, backend ->
+        s.usageRecorder = { model, usage, ms, ok, err, backend, uid ->
             UsageStore.record(app, model,
                 usage?.optInt("prompt_tokens", 0) ?: 0,
                 usage?.optInt("completion_tokens", 0) ?: 0,
@@ -62,7 +62,8 @@ object Gateway {
                 ms, ok, err ?: "")
             // 「只在转发的时候加载正在使用的」：每次转发后顺手刷新当前账号额度（内部节流 60s），
             // 不再有定时轮询 —— 那是把账号拿去刷接口，token 会被判废。
-            CreditMonitor.noteForwarded(app, backend)
+            // 只刷新"这次实际用到的那个平台、那个账号"，跨平台/跨账号一律不碰
+            CreditMonitor.noteForwarded(app, backend, uid)
         }
         // 每次转发前取「当下有效」的凭证（必要时续期）。服务是长驻的、token 会过期，
         // 不能只在启动/登录/切账号时推一次快照（那样跑够 14 天后全是 401）。

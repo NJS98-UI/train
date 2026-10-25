@@ -36,7 +36,7 @@ class LocalFakeServer(private val apiKey: String) {
 
     /** 聊天用量回调：每次转发结束调用（后台线程）。参数=model,usage(可为null),耗时ms,成功,错误类型。 */
     @Volatile
-    var usageRecorder: ((String, org.json.JSONObject?, Long, Boolean, String?, String) -> Unit)? = null
+    var usageRecorder: ((String, org.json.JSONObject?, Long, Boolean, String?, String, String) -> Unit)? = null
 
     /**
      * 故障转移：上一个账号**在还没吐出任何正文之前**就失败时，问一次"换哪个账号"。
@@ -588,6 +588,7 @@ class LocalFakeServer(private val apiKey: String) {
         wantsStream: Boolean,
         model: String,
         backend: String,
+        usedUid: () -> String?,
         runUpstream: (emit: (String) -> Unit, done: (org.json.JSONObject?, String?) -> Unit) -> Unit,
         tryFailover: (err: String) -> Boolean,
         onRollback: () -> Unit,
@@ -657,7 +658,9 @@ class LocalFakeServer(private val apiKey: String) {
             if (!switched && !refreshed) {
                 // 收尾：把攒下的（正常情况下是错误事件）交给客户端
                 for (p in pending) writeChunk(p)
-                usageRecorder?.invoke(model, usage, System.currentTimeMillis() - t0, err == null, err, backend)
+                usageRecorder?.invoke(
+                    model, usage, System.currentTimeMillis() - t0, err == null, err, backend, usedUid() ?: "",
+                )
                 // 换了号却没救活 → 还原成用户原来的账号，免得每次请求都换一次、来回跳
                 if (attempt > 0 && err != null) {
                     try { onRollback() } catch (e: Exception) {
@@ -755,6 +758,7 @@ class LocalFakeServer(private val apiKey: String) {
             wantsStream = wantsStream,
             model = model,
             backend = GatewayBackend.TRAE,
+            usedUid = { cur.uid },
             runUpstream = { emit, done ->
                 TraeUpstream.chatStream(prepared, cur.accessToken, cur.uid, emit, done)
             },
@@ -793,6 +797,7 @@ class LocalFakeServer(private val apiKey: String) {
             wantsStream = wantsStream,
             model = model,
             backend = GatewayBackend.QODER,
+            usedUid = { cur.uid },
             runUpstream = { emit, done ->
                 QoderUpstream.chatStream(
                     context = ctx,

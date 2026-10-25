@@ -22,7 +22,6 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.NumberPicker
 import android.widget.ScrollView
-import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import java.text.SimpleDateFormat
@@ -728,47 +727,8 @@ class MainActivity : Activity() {
             })
         }
 
-        // ---- 积分检测（无说明）----
-        addView(section("积分检测"))
-        addView(card {
-            val cur = CreditMonitor.threshold(this@MainActivity)
-            addView(row {
-                addView(text("换号阈值", FS_VALUE, true), weighted())
-                addView(chipInfo("≤ $cur"))
-            })
-            addView(row(8) {
-                listOf(5L, 10L, 15L, 20L).forEachIndexed { i, v ->
-                    addView(action("$v", outlined = cur != v) {
-                        CreditMonitor.setThreshold(this@MainActivity, v)
-                        render(currentPage)
-                    }, weighted(start = if (i == 0) 0 else 8))
-                }
-            }, top(10))
-            val interval = CreditMonitor.intervalSec(this@MainActivity)
-            addView(row {
-                addView(text("检测间隔", FS_VALUE, true), weighted())
-                addView(chipInfo(if (interval == 0) "已暂停" else "$interval 秒"))
-            }, top(18))
-            val seek = SeekBar(this@MainActivity).apply {
-                // 步进 10 秒：1~9 秒会被 setIntervalSec 抬到 10，滑块位置和实际值就对不上了。
-                // 上限 60 秒 × 10 = 600 秒。
-                max = 60
-                progress = (interval / 10).coerceIn(0, 60)
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
-                        // 0 = 停止扫描；其余按 10 秒一档（10s ~ 600s）
-                        if (fromUser) CreditMonitor.setIntervalSec(this@MainActivity, value * 10)
-                    }
-                    override fun onStartTrackingTouch(sb: SeekBar?) {}
-                    override fun onStopTrackingTouch(sb: SeekBar?) { render(currentPage) }
-                })
-            }
-            addView(seek, top(6))
-            addView(row {
-                addView(caption("0 = 不自动查（只用的时候刷新）"), weighted())
-                addView(caption("600 秒"))
-            }, top(2))
-        }, top(8))
+        // 「积分检测」整块已删除：定时轮询会拿账号去刷上游接口（token 会被判废）。
+        // 现在只在**请求转发时**刷新刚用到的那个平台的那个账号，没有任何定时扫描。
 
         // ---- 账户导出：只留导出 / 导入 ----
         addView(section("账户导出"))
@@ -2749,17 +2709,9 @@ class MainActivity : Activity() {
         super.onResume()
         // 有任一账号（Trae 或 Qoder）就把积分监测拉起来，账号页才能"每 2 秒"看到活的积分/自动换号。
         // 与网关启动时拉起的那次幂等（CreditMonitor.start 内部已挡重复启动）。
-        // 默认**完全不轮询**（间隔 0）：只在转发时刷新刚用到的那个账号，
-        // 见 CreditMonitor.noteForwarded。"没有请求模型的时候就停止扫描"。
-        // 只有用户自己在界面上把间隔调成 > 0 才起这条线程。
-        if (CreditMonitor.intervalSec(this) > 0 &&
-            (TraeAuthStore.activeUid(this) != null || QoderAuthStore.activeUid(this) != null)
-        ) {
-            CreditMonitor.start(this)
-        } else {
-            // 用户把间隔调回 0（或本来就没开）→ 确保后台线程真的停了
-            CreditMonitor.stop()
-        }
+        // 定时轮询已彻底删除：没有任何后台线程。"没有请求就不刷新"。
+        // 唯一的刷新点是转发完成回调（CreditMonitor.noteForwarded，只查刚用到的那个账号）。
+        CreditMonitor.stop()
         CreditMonitor.listener = CreditMonitor.Listener { s -> applyMonitorSnapshot(s) }
         // 进页面先回填上一次快照，避免要等最多 2 秒才出数。
         CreditMonitor.currentSnapshot()?.let { applyMonitorSnapshot(it) }

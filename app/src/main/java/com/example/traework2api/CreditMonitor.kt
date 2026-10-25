@@ -7,7 +7,8 @@ import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 积分监测器：每 [TICK_MS]（2 秒）查一次**当前账号**可用积分，可选地在积分用完后**自动换到还有积分的账号**。
+ * 积分刷新器：**只在转发完成后**刷新"刚被使用的那个平台的那个账号"。
+
  *
  * 覆盖两套账号：
  *  - **Trae**（国服）：真正驱动 OpenAI 转发的账号。查 [TraeUpstream.fetchUsage]，
@@ -26,8 +27,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 object CreditMonitor {
 
     private const val TAG = "CreditMonitor"
-    private const val TICK_MS = 2_000L
-
     /**
      * 默认检测间隔（秒）。
      *
@@ -44,14 +43,9 @@ object CreditMonitor {
      * 每次请求完成后顺手看一眼当前账号还剩多少，同一分钟内只查一次。
      */
     private const val FORWARD_POLL_MIN_MS = 60_000L
-    private const val MIN_INTERVAL_SEC = 10
 
-    /** 自动换号时扫描"其它账号"的缓存时长：别每轮都把所有号问一遍。 */
-    private const val SCAN_CACHE_MS = 5 * 60 * 1000L
-
-    @Volatile private var lastForwardPollAt = 0L
-    @Volatile private var lastScanAt = 0L
-    @Volatile private var lastScanPick: String? = null
+    @Volatile private var lastTraePollAt = 0L
+    @Volatile private var lastQoderPollAt = 0L
 
     private const val PREFS = "traework2api_prefs"
     private const val KEY_AUTO = "auto_switch_enabled"
@@ -117,17 +111,6 @@ object CreditMonitor {
      * 0 表示**暂停检测**：只保留服务转发，不再轮询积分/自动换号。
      * 用户要的是"自己定节奏"，所以这里不做固定档位，直接给 0-60 的连续值。
      */
-    fun intervalSec(ctx: Context): Int {
-        val v = prefs(ctx).getInt(KEY_INTERVAL, DEFAULT_INTERVAL_SEC)
-        if (v <= 0) return 0                      // 0 = 暂停
-        return v.coerceIn(MIN_INTERVAL_SEC, 3600)
-    }
-
-    fun setIntervalSec(ctx: Context, v: Int) {
-        val fixed = if (v <= 0) 0 else v.coerceAtLeast(MIN_INTERVAL_SEC)
-        prefs(ctx).edit().putInt(KEY_INTERVAL, fixed).apply(); stale = true
-    }
-
     fun currentSnapshot(): Snapshot? = latest
 
     /**
@@ -140,22 +123,25 @@ object CreditMonitor {
      *
      * 不用定时轮询：那是拿账号去刷上游接口，token 会被判废（见 DEFAULT_INTERVAL_SEC 注释）。
      */
-    fun noteForwarded(context: Context, backend: String) {
+    fun noteForwarded(context: Context, backend: String, uid: String?) {
         val now = System.currentTimeMillis()
-        if (now - lastForwardPollAt < FORWARD_POLL_MIN_MS) return
-        lastForwardPollAt = now
+        // **每个平台各自节流**：Trae 的请求不该压住 Qoder 的刷新（反之亦然）。
+        val lastAt = if (backend == GatewayBackend.QODER) lastQoderPollAt else lastTraePollAt
+        if (now - lastAt < FORWARD_POLL_MIN_MS) return
+        if (backend == GatewayBackend.QODER) lastQoderPollAt = now else lastTraePollAt = now
         val app = context.applicationContext ?: context
         appCtx = app
         Thread({
             runCatching {
+                // 严格按"哪个平台、哪个账号"，两个平台互不牵连：
+                //  - 走 Qoder → 只查 Qoder 的 uid，Trae 一次请求都不发
+                //  - 走 Trae  → 只查 Trae 的 uid，Qoder 一次请求都不发
                 val snap = if (backend == GatewayBackend.QODER) {
-                    // 只查 Qoder 当前账号，Trae 完全不碰
-                    val (uid, remaining) = pollQoder(app)
-                    Snapshot(null, null, uid, remaining, isAutoSwitchEnabled(app), threshold(app))
+                    val (qUid, remaining) = pollQoder(app, uid)
+                    Snapshot(null, null, qUid, remaining, isAutoSwitchEnabled(app), threshold(app))
                 } else {
-                    // 只查 Trae 当前账号，Qoder 完全不碰
-                    val (uid, bal) = pollTrae(app)
-                    Snapshot(uid, bal, null, null, isAutoSwitchEnabled(app), threshold(app))
+                    val (tUid, bal) = pollTrae(app, uid)
+                    Snapshot(tUid, bal, null, null, isAutoSwitchEnabled(app), threshold(app))
                 }
                 latest = snap
                 stale = false
@@ -164,119 +150,48 @@ object CreditMonitor {
         }, "credit-after-forward").apply { isDaemon = true }.start()
     }
 
+    /**
+     * 删除定时轮询（用户要求，2026-10-25）。
+     *
+     * 理由：只要存在"定时扫描"，就一定会出现"没在用它也在打上游"的情况，
+     * 而每次扫描都是一次真实的 `ide_user_ent_usage` 请求 —— 上游按滥用处理会废掉 token。
+     * 现在**唯一**的刷新入口是转发完成后的 [noteForwarded]，没有任何后台线程。
+     *
+     * 保留 `start`/`stop` 的空实现，只为不破坏调用点的语义（幂等、可安全重复调用）。
+     */
     fun start(context: Context) {
         appCtx = context.applicationContext
-        if (running) return
-        running = true
-        thread = Thread({ loop() }, "credit-monitor").apply { isDaemon = true; start() }
-        Log.i(TAG, "积分监测已启动")
+        Log.i(TAG, "定时轮询已废弃：只在前台请求转发后刷新当前平台当前账号")
     }
 
     fun stop() {
-        running = false
-        thread = null
-        Log.i(TAG, "积分监测已停止")
-    }
-
-    private fun loop() {
-        while (running) {
-            try { tick() } catch (e: Exception) {
-                Log.w(TAG, "tick 异常: ${e.javaClass.simpleName}: ${e.message}")
-            }
-            // 间隔每轮现取：用户在界面上拖动滑块后，下一个 tick 就生效（不用重启监测）
-            val wait = appCtx?.let { intervalSec(it) * 1000L } ?: TICK_MS
-            if (wait <= 0L) {
-                // 0 = 暂停检测：睡 1 秒再读一次设置，避免空转烧 CPU
-                try { Thread.sleep(1_000) } catch (_: InterruptedException) { break }
-                continue
-            }
-            var slept = 0L
-            while (running && slept < wait) {
-                try { Thread.sleep(wait - slept) } catch (_: InterruptedException) { break }
-                slept = wait
-            }
-        }
-    }
-
-    private fun tick() {
-        val ctx = appCtx ?: return
-        if (!inFlight.compareAndSet(false, true)) return   // 上一轮没跑完，跳过
-        try {
-            val (traeUid, traeBal) = pollTrae(ctx)
-            val (qoderUid, qoderBal) = pollQoder(ctx)
-            val snap = Snapshot(traeUid, traeBal, qoderUid, qoderBal,
-                isAutoSwitchEnabled(ctx), threshold(ctx))
-            latest = snap
-            stale = false
-            listener?.let { l -> main.post { l.onSnapshot(snap) } }
-        } finally {
-            inFlight.set(false)
-        }
+        // 无后台线程可停；保留空实现让调用方无需判空
     }
 
     // ---- Trae ----
 
     /** 返回 (当前 uid, 当前积分)。查不到积分返回 (uid, null)。 */
-    private fun pollTrae(ctx: Context): Pair<String?, Long?> {
-        val uid = TraeAuthStore.activeUid(ctx) ?: return null to null
+    private fun pollTrae(ctx: Context, wantedUid: String?): Pair<String?, Long?> {
+        // 用传进来的 uid（转发时实际用的那个），拿不到才回落到当前账号
+        val uid = wantedUid?.takeIf { it.isNotBlank() } ?: TraeAuthStore.activeUid(ctx) ?: return null to null
         val cred = TraeAuthStore.loadByUid(ctx, uid) ?: return uid to null
         if (!cred.region.isSupported) return uid to null
         val token = Gateway.locked { TraeAuthApi.restartWithValidToken(ctx, skewSec = 3600L) }
             ?: cred.accessToken.takeIf { it.isNotBlank() }
+        // ⚠️ **禁止**在这里自动换号：换号前要遍历其它账号逐一查积分（跨账号刷新），
+        // 用户明确禁止（"禁止跨平台刷新。跨账号刷新"）。余额见底只如实显示，由用户自己切。
         val bal = if (token.isNullOrBlank()) null else TraeUpstream.fetchUsage(token, cred.uid, cred.region)
-        if (bal != null && isAutoSwitchEnabled(ctx) && bal <= threshold(ctx)) {
-            switchTraeToFunded(ctx, uid, cred.region)
-            return TraeAuthStore.activeUid(ctx) to null   // 换号后本轮不再回填，下轮读新号
-        }
         return uid to bal
     }
 
-    /**
-     * 在**其余国服账号**里找一个有积分的，切过去（含区域同步）。找到返回 true。
-     * 全程持 [Gateway.locked]：续期是轮换的，别和转发并发换 token。
-     */
-    private fun switchTraeToFunded(ctx: Context, fromUid: String, fromRegion: TraeRegion): Boolean {
-        // 扫描缓存：5 分钟内扫过就复用结论，不把每个号再问一遍。
-        // 曾经每轮 tick 都遍历所有账号 → 号越多上游请求越多，等于自己把号刷废。
-        val now = System.currentTimeMillis()
-        val cachedPick = lastScanPick
-        if (now - lastScanAt < SCAN_CACHE_MS) {
-            if (cachedPick == null || cachedPick == fromUid) return false
-            val m = TraeAuthStore.loadByUid(ctx, cachedPick) ?: return false
-            TraeAuthStore.setActive(ctx, m.uid)
-            TraeAuthStore.syncRegionToActiveAccount(ctx)
-            return true
-        }
-        val pick = scanFunded(ctx, fromUid)
-        lastScanAt = now
-        lastScanPick = pick
-        if (pick == null) return false
-        TraeAuthStore.setActive(ctx, pick)
-        TraeAuthStore.syncRegionToActiveAccount(ctx)
-        return true
-    }
-
-    /** 扫其余国服账号，返回第一个"有积分"的 uid；没有返回 null。 */
-    private fun scanFunded(ctx: Context, fromUid: String): String? = Gateway.locked {
-        val others = TraeAuthStore.list(ctx)
-            .filter { it.uid != fromUid && it.region.isSupported }
-        for (m in others) {
-            val c = TraeAuthStore.loadByUid(ctx, m.uid) ?: continue
-            val tok = TraeAuthApi.restartWithValidTokenFor(ctx, c, skewSec = 3600L)
-                ?: c.accessToken.takeIf { it.isNotBlank() }
-            val bal = if (tok.isNullOrBlank()) null else TraeUpstream.fetchUsage(tok, c.uid, c.region)
-            if (bal != null && bal > threshold(ctx)) {
-                Log.i(TAG, "积分用完($fromUid) → 可换到 $m.uid(${m.nickname}) 余=$bal")
-                return@locked m.uid
-            }
-        }
-        null
-    }
+    // 自动换号（switchTraeToFunded / scanFunded）已删除：
+    // 它会在余额见底时遍历**其它所有账号**逐个查积分 —— 正是用户禁止的"跨账号刷新"，
+    // 也是把账号刷废的来源。余额见底只如实显示，切号由用户手动决定。
 
     // ---- Qoder ----
 
-    private fun pollQoder(ctx: Context): Pair<String?, Double?> {
-        val uid = QoderAuthStore.activeUid(ctx) ?: return null to null
+    private fun pollQoder(ctx: Context, wantedUid: String?): Pair<String?, Double?> {
+        val uid = wantedUid?.takeIf { it.isNotBlank() } ?: QoderAuthStore.activeUid(ctx) ?: return null to null
         val cred = QoderAuthStore.loadByUid(ctx, uid) ?: return uid to null
         val jt = QoderAuthApi.validJobToken(ctx, skewMillis = 60_000L)
         val credits = if (jt.isNullOrBlank()) null else QoderAuthApi.fetchCredits(jt, cred.mode)
@@ -315,7 +230,5 @@ object CreditMonitor {
         // 轮询节奏：默认必须远大于秒级，否则等于拿账号去刷接口（token 会被判废）
         check(DEFAULT_INTERVAL_SEC == 0) { "自检失败：默认不许定时轮询（只在转发时刷新当前账号）" }
         check(FORWARD_POLL_MIN_MS >= 60_000L) { "自检失败：转发后刷新节流过短（会变成刷接口）" }
-        check(MIN_INTERVAL_SEC >= 10) { "自检失败：最小轮询间隔过密" }
-        check(SCAN_CACHE_MS >= 60_000L) { "自检失败：自动换号扫描缓存过短" }
     }
 }
