@@ -275,18 +275,67 @@ object TraeAuthApi {
      * 绝不能因为探测别的号就把用户正在用的当前账号切走或污染全局区域。
      * 续期失败时回落到已存的（可能过期的）access token，行为与原逻辑一致。
      */
-    fun restartWithValidTokenFor(context: Context, cred: TraeAuthStore.Cred, skewSec: Long): String? {
-        if (cred.accessToken.isNotBlank() && !expiredWithin(cred.expiresAt, skewSec)) return cred.accessToken
-        if (cred.refreshToken.isBlank()) return cred.accessToken.takeIf { it.isNotBlank() }
-        val ex = runCatching { exchangeToken(cred.refreshToken, cred.region) }
-            .getOrElse { Log.w(TAG, "候选账号 ${cred.uid} 续期失败: ${it.message}"); return cred.accessToken.takeIf { t -> t.isNotBlank() } }
-        val newCred = cred.copy(
+    fun restartWithValidTokenFor(context: Context, cred: TraeAuthStore.Cred, skewSec: Long): String? =
+        ensureFreshTokenFor(context, cred, skewSec) ?: cred.accessToken.takeIf { it.isNotBlank() }
+
+    /**
+     * **唯一续期入口**（所有"要不要续/怎么续"的判定都收到这里）。
+     *
+     * 两条纪律，缺一条就会把账号弄废：
+     *
+     * 1. **先读库里的最新凭据**，不拿调用方手里的快照去续。调用方的 `cred` 可能是几秒前
+     *    `loadByUid` 拿的，期间别处（转发/积分监测/另一个账号的签到）已经续过一次 ——
+     *    再拿**旧的 refreshToken** 去换，服务端会把它当成"旧令牌重放"，按轮换安全策略
+     *    把整条令牌族作废。表现就是：签到明明成功了，过一会儿全部 401。
+     * 2. **别人续过就复用，不再轮换**：库里 access token 已经和调用方手里的不一样了，
+     *    说明新鲜度由别人保证了，直接拿来用，一次网络请求都不发。
+     *
+     * 返回 null 表示"续不动"（无 refreshToken / 上游拒绝），调用方据此如实报错。
+     */
+    fun ensureFreshTokenFor(context: Context, cred: TraeAuthStore.Cred, skewSec: Long): String? {
+        val fresh = runCatching { TraeAuthStore.loadByUid(context, cred.uid) }.getOrNull() ?: cred
+        if (fresh.accessToken.isNotBlank() && !expiredWithin(fresh.expiresAt, skewSec)) return fresh.accessToken
+        // 调用方快照里的 token 和库里的不一样 → 期间已被别处刷新，直接用库里的
+        if (reuseAfterRace(cred.accessToken, fresh.accessToken)) {
+            Log.i(TAG, "${cred.uid} 已被别处续期，复用库里的 token（不轮换）")
+            return fresh.accessToken
+        }
+        return refreshLocked(context, cred.uid, fresh.accessToken)
+    }
+
+    /** 调用方手里的 token 与库里不同 → 说明期间别处已经续过，该复用而不是再续一次。 */
+    internal fun reuseAfterRace(staleAccess: String, storedAccess: String): Boolean =
+        storedAccess.isNotBlank() && storedAccess != staleAccess
+
+    /** 写回前的守卫：库里 refreshToken 还是我们用的那个才覆盖（防止覆盖更新的凭据）。 */
+    internal fun shouldWriteBack(usedRefresh: String, storedRefresh: String): Boolean =
+        storedRefresh.isBlank() || storedRefresh == usedRefresh
+
+    /** 真续期：必须在 [Gateway.locked] 内调用（synchronized 可重入，重复包裹安全）。 */
+    private fun refreshLocked(context: Context, uid: String, staleAccess: String): String? {
+        val base = runCatching { TraeAuthStore.loadByUid(context, uid) }.getOrNull() ?: return null
+        if (reuseAfterRace(staleAccess, base.accessToken)) return base.accessToken
+        if (base.refreshToken.isBlank()) {
+            Log.w(TAG, "$uid 无 refreshToken，无法续期")
+            return null
+        }
+        val ex = runCatching { exchangeToken(base.refreshToken, base.region) }
+            .getOrElse { Log.w(TAG, "$uid 续期失败: ${it.javaClass.simpleName}: ${it.message}"); return null }
+        val stored = runCatching { TraeAuthStore.loadByUid(context, uid) }.getOrNull()
+        if (stored != null && !shouldWriteBack(base.refreshToken, stored.refreshToken)) {
+            // 我们续期的这段时间里，别处又把 refreshToken 换掉了 —— 我们的结果已经过期，
+            // 写回去会把更新的凭据盖掉（下一个请求就拿旧令牌去撞墙）。
+            Log.w(TAG, "$uid 续期期间凭据又被更新，放弃写回，采用库里那份")
+            return stored.accessToken.takeIf { it.isNotBlank() } ?: ex.accessToken
+        }
+        val newCred = base.copy(
             accessToken = ex.accessToken,
-            refreshToken = ex.refreshToken ?: cred.refreshToken,
-            expiresAt = ex.expiresAt ?: cred.expiresAt,
+            refreshToken = ex.refreshToken ?: base.refreshToken,
+            expiresAt = ex.expiresAt ?: base.expiresAt,
         )
         TraeAuthStore.updateTokens(context, newCred)   // 不碰 active
         TraeAuthStore.updateMeta(context, newCred.toMeta())
+        Log.i(TAG, "$uid 续期成功 (refresh轮换=${ex.refreshToken != null})")
         return ex.accessToken
     }
 
@@ -297,17 +346,10 @@ object TraeAuthApi {
      * 续不动返回 null（调用方据此把失败如实标出来，别无限重试）。
      */
     fun forceRefreshTokenFor(context: Context, cred: TraeAuthStore.Cred): String? {
-        if (cred.refreshToken.isBlank()) return null
-        val ex = runCatching { exchangeToken(cred.refreshToken, cred.region) }
-            .getOrElse { Log.w(TAG, "强制续期失败 ${cred.uid}: ${it.javaClass.simpleName}"); return null }
-        val newCred = cred.copy(
-            accessToken = ex.accessToken,
-            refreshToken = ex.refreshToken ?: cred.refreshToken,
-            expiresAt = ex.expiresAt ?: cred.expiresAt,
-        )
-        TraeAuthStore.updateTokens(context, newCred)
-        TraeAuthStore.updateMeta(context, newCred.toMeta())
-        return ex.accessToken
+        // 走同一入口：先看库里是否已被别处续过（那就直接复用，绝不再轮换一次）。
+        val fresh = runCatching { TraeAuthStore.loadByUid(context, cred.uid) }.getOrNull() ?: cred
+        if (reuseAfterRace(cred.accessToken, fresh.accessToken)) return fresh.accessToken
+        return refreshLocked(context, cred.uid, cred.accessToken)
     }
 
     private fun expiredWithin(expiresAt: Long?, skewSec: Long): Boolean {
@@ -330,6 +372,13 @@ object TraeAuthApi {
         val skew = 3600L
         // 未知到期时间（0 / null / 负数）必须判为过期 → 才会走续期，而不是盲用一个未知的 token
         check(expiredWithin(0L, skew)) { "自检失败：exp=0（未知）应判为已过期" }
+        // 防令牌重放的两条守卫（"签到把 token 弄废"的结构性修复，别删）
+        check(reuseAfterRace("old", "new")) { "自检失败：库里 token 更新过就应复用" }
+        check(!reuseAfterRace("same", "same")) { "自检失败：token 相同不算被别处续过" }
+        check(!reuseAfterRace("old", "")) { "自检失败：库里为空不能当已续期" }
+        check(shouldWriteBack("r1", "r1")) { "自检失败：refreshToken 没变应允许写回" }
+        check(shouldWriteBack("r1", "")) { "自检失败：库里没有 refreshToken 应允许写回" }
+        check(!shouldWriteBack("r1", "r2")) { "自检失败：refreshToken 变了必须放弃写回" }
         check(expiredWithin(null, skew)) { "自检失败：exp=null 应判为已过期" }
         check(expiredWithin(-5L, skew)) { "自检失败：负数 exp 应判为已过期" }
         // 已经过去 → 过期

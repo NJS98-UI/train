@@ -217,21 +217,17 @@ object BatchCheckin {
         return try {
             var cred = TraeAuthStore.loadByUid(ctx, meta.uid)
                 ?: return PerAccount(meta.uid, name, "fail", -1, "凭据读取失败")
-            // 临近/已过期先续期（按账号自己的区域换 token；写回不碰 active）
+            // 临近/已过期先续期 —— **只走统一入口**，不自己拿快照里的 refreshToken 去换。
+            // 自己续的坑：cred 是几秒前 loadByUid 的快照，期间别处（转发/积分监测/另一账号签到）
+            // 可能已经续过一次；再拿旧 refreshToken 去换会被服务端当成"旧令牌重放"，
+            // 按轮换安全策略把整条令牌族作废 —— 这就是"签到成功后 token 全废"的机制。
             if (cred.accessToken.isBlank() || expiredWithin(cred.expiresAt, 3600)) {
-                if (cred.refreshToken.isBlank()) {
-                    return PerAccount(meta.uid, name, "fail", -1, "token 已过期且无 refreshToken，需重新登录")
+                val tok = Gateway.locked { TraeAuthApi.ensureFreshTokenFor(ctx, cred, skewSec = 3600L) }
+                if (tok.isNullOrBlank()) {
+                    return PerAccount(meta.uid, name, "fail", -1, "token 已过期且续不回来，需重新登录")
                 }
-                // 续期是**轮换制**：必须与转发/积分查询共用同一把锁，
-                // 否则两处同时拿旧 refreshToken 续期，先成功的那个会被后失败的顶掉，
-                // 表现就是"签到成功后过一会儿 token 全废、查不到积分、显示没有签到权限"。
-                val ex = Gateway.locked { TraeAuthApi.exchangeToken(cred.refreshToken, reg) }
-                cred = cred.copy(accessToken = ex.accessToken, refreshToken = ex.refreshToken ?: cred.refreshToken,
-                    expiresAt = ex.expiresAt ?: cred.expiresAt)
-                TraeAuthStore.updateTokens(ctx, cred)
-                // expiresAt 存在索引（元数据）里，必须跟着更新：不更新的话下次批量会拿
-                // 陈旧到期时间再"续期"一次，白白多消耗一个 refresh token（轮换制）。
-                TraeAuthStore.updateMeta(ctx, cred.toMeta())
+                // 入口内部已写回库（含 expiresAt 元数据），这里只刷新本地副本给后续请求用
+                cred = cred.copy(accessToken = tok)
             }
             // 先查状态再决定发不发 claim（照抄单账号路径的纪律）
             val before = TraeUpstream.fetchCheckinHealing(ctx, cred)
