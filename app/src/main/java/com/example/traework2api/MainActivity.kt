@@ -637,12 +637,13 @@ class MainActivity : Activity() {
                     addView(creditLabel(AccountCredits.TRAE, traeCred.uid), top(6))
                     // 卡上直接签到：不用滚到页面底部的一键签到
                     addView(row(8) {
-                        addView(
-                            action(if (accountCheckin?.checkedIn == true) "已签到" else "签到", outlined = true) {
-                                claimCheckin()
-                            },
-                            weighted(),
-                        )
+                        // 文案走 checkinActionLabel（含本地落库判断），和按钮的实际可点状态同源。
+                        // 以前这里自己写 `accountCheckin?.checkedIn == true`：打开 App 时该值是 null，
+                        // 于是已签到的号也显示「签到」——本地明明记着今天签过了。
+                        val btn = action(checkinActionLabel(traeCred != null), outlined = true) { claimCheckin() }
+                        addView(btn, weighted())
+                        // 建好之后立刻按真实状态修正文案/可点性（refreshCheckinButton 内部会调 checkinActionLabel）
+                        btn.post { if (!isFinishing && !isDestroyed) refreshCheckinButton(btn, traeCred != null) }
                     }, top(12))
                 }
             })
@@ -1465,7 +1466,9 @@ class MainActivity : Activity() {
         thread(name = "qoder-claim-one") {
             val r = runCatching { QoderAuthApi.claimDailyForUid(this, uid) }
                 .getOrElse { QoderAuthApi.QClaimResult("fail", 0, "${it.javaClass.simpleName}: ${it.message}") }
-            if (r.status == "ok") QoderCheckin.markClaimed(this, uid)
+            // ok = 这次领到了；already = 今天已领过 → 两种都算"今天收工"，都要落库，
+            // 否则界面下次打开还显示「领取」，用户点了才发现已领取。
+            if (r.status == "ok" || r.status == "already") QoderCheckin.markClaimed(this, uid)
             runOnUiThread {
                 qoderClaimBusy = false
                 if (isFinishing || isDestroyed) return@runOnUiThread
@@ -2518,6 +2521,10 @@ class MainActivity : Activity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (tail == null) {
                     accountCheckin = known ?: accountCheckin
+                    // 落库：本地记下"今天这个号已处理"，下次打开 App 不用请求就能显示「已签到」
+                    val uid = cred.uid
+                    if (known?.checkedIn == true) AutoCheckin.markDone(this, "trae:$uid")
+                    else if (known?.enable == false) AutoCheckin.markDone(this, "trae:$uid")
                     toast(if (known?.enable == false) "该账号无签到权限" else "已签到")
                     quotaApply?.invoke()
                     return@runOnUiThread
@@ -2525,6 +2532,10 @@ class MainActivity : Activity() {
                 val (code, after, u) = tail
                 accountBalance = u ?: accountBalance
                 accountCheckin = after ?: accountCheckin
+                // 签到成功 / 已签 → 落库，界面与自动补签共用同一份事实
+                if (after?.checkedIn == true || TraeUpstream.checkinSucceeded(known, after, code)) {
+                    AutoCheckin.markDone(this, "trae:${cred.uid}")
+                }
                 toast(
                     when {
                         TraeUpstream.checkinSucceeded(known, after, code) -> "签到成功"
@@ -2714,11 +2725,14 @@ class MainActivity : Activity() {
         if (AutoCheckin.shouldAttempt(this)) {
             thread(name = "auto-checkin") {
                 val summary = runCatching { AutoCheckin.runAllOnce(this) }.getOrNull()
-                if (summary != null) runOnUiThread {
+                // **无论有没有"领到了"的摘要都要重画**：runAllOnce 会把"已签 / 无权限"的账号
+                // 也 markDone 落库，界面据此把按钮切成「已签到」。以前只在 summary != null 时重画，
+                // 于是"本来就是已签"的号落库了但界面不刷新，按钮一直显示「签到」。
+                runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     qoderRemaining = null
                     CreditMonitor.stale = true
-                    toast("已自动补签：$summary")
+                    if (summary != null) toast("已自动补签：$summary")
                     render(currentPage)
                 }
             }
