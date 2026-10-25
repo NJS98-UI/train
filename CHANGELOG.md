@@ -8,6 +8,23 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.14] - 2026-10-17
+
+### Fixed（把"token 自己会失效"的漏洞堵掉）
+- **批量签到续期没上锁**：`BatchCheckin` 直接调 `TraeAuthApi.exchangeToken`，与转发链路/
+  积分查询并发时会**同时用旧 refreshToken 续期**。轮换制下先成功的那个会被后失败的顶掉
+  —— 这就是"签到成功后过一会儿 token 全废"最可能的成因。现在统一走 `Gateway.locked`
+  （`synchronized` 可重入，`runAll` 本来就在锁内，不会死锁）。
+- **转发 401 不再立刻换号**：以前 Trae 转发撞 401 直接切到别的账号（会真的切走并持久化），
+  现在先在**同一账号**上强制续一次 token 重试，续不动才换号
+  （`streamWithFailover` 新增 `refreshSameAccount` 钩子）。
+- 签到状态查询（`AutoCheckin` / `BatchCheckin`）全部改走 `fetchCheckinHealing`，自带 401 自愈。
+
+### Note
+- 能自动的是 **access token**（靠 refreshToken 续，用户无感）。
+  自动不了的是 **refreshToken 本身被服务端判废** —— 那种情况任何本地手段都救不回来，必须重走一次 OAuth 登录。
+  0.7.14 做的是"别自己把 refreshToken 弄废"。
+
 ## [0.7.13] - 2026-10-17
 
 ### Fixed（账号导出完整性）

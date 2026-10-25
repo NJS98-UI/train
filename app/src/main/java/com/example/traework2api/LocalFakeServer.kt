@@ -590,6 +590,7 @@ class LocalFakeServer(private val apiKey: String) {
         runUpstream: (emit: (String) -> Unit, done: (org.json.JSONObject?, String?) -> Unit) -> Unit,
         tryFailover: (err: String) -> Boolean,
         onRollback: () -> Unit,
+        refreshSameAccount: ((err: String) -> Boolean)? = null,
     ) {
         if (wantsStream) {
             out.write("HTTP/1.1 200 OK\r\n".toByteArray())
@@ -612,6 +613,7 @@ class LocalFakeServer(private val apiKey: String) {
         }
 
         var attempt = 0
+        var didRefresh = false   // 已在同一账号上强制续期重试过
         while (true) {
             val t0 = System.currentTimeMillis()
             val pending = ArrayList<String>()
@@ -630,15 +632,28 @@ class LocalFakeServer(private val apiKey: String) {
                 }
             }) { u, e -> usage = u; err = e }
 
-            // 换号条件：这次没成功 + 错误值得换 + 还没换过 + 确实有别的账号
-            val switched = if (!streaming && err != null && attempt == 0 && retryableUpstreamError(err!!)) {
+            // 先在同一账号上强制续期重试：token 未到期却被判废时，换号是浪费
+            // （换号会真的切走并持久化，用户下次对话就换了账号）。
+            val refreshed = if (!streaming && err != null && !didRefresh && retryableUpstreamError(err!!)) {
+                try { refreshSameAccount?.invoke(err!!) ?: false } catch (e: Exception) {
+                    android.util.Log.w(TAG, "同账号续期失败: ${e.javaClass.simpleName}: ${e.message}")
+                    false
+                }
+            } else false
+            if (refreshed) {
+                didRefresh = true
+                android.util.Log.i(TAG, "同账号续期后重试（原错误: $err）")
+            }
+
+            // 换号条件：这次没成功 + 续期没救活 + 错误值得换 + 还没换过 + 确实有别的账号
+            val switched = if (!refreshed && !streaming && err != null && attempt == 0 && retryableUpstreamError(err!!)) {
                 try { tryFailover(err!!) } catch (e: Exception) {
                     android.util.Log.w(TAG, "换号失败: ${e.javaClass.simpleName}: ${e.message}")
                     false
                 }
             } else false
 
-            if (!switched) {
+            if (!switched && !refreshed) {
                 // 收尾：把攒下的（正常情况下是错误事件）交给客户端
                 for (p in pending) writeChunk(p)
                 usageRecorder?.invoke(model, usage, System.currentTimeMillis() - t0, err == null, err)
@@ -747,6 +762,14 @@ class LocalFakeServer(private val apiKey: String) {
                 if (next != null) { cur = next; true } else false
             },
             onRollback = { failoverRollback?.invoke(originalUid) },
+            // 401 先自己救：强制续一次 token，同账号重试。续不动才轮到换号。
+            refreshSameAccount = refresh@{ _ ->
+                val ctx = appContext ?: return@refresh false
+                val t = Gateway.locked { TraeAuthApi.forceRefreshTokenFor(ctx, cur) }
+                    ?: return@refresh false
+                cur = cur.copy(accessToken = t)
+                true
+            },
         )
     }
 

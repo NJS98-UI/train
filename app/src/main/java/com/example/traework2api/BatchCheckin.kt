@@ -222,7 +222,10 @@ object BatchCheckin {
                 if (cred.refreshToken.isBlank()) {
                     return PerAccount(meta.uid, name, "fail", -1, "token 已过期且无 refreshToken，需重新登录")
                 }
-                val ex = TraeAuthApi.exchangeToken(cred.refreshToken, reg)
+                // 续期是**轮换制**：必须与转发/积分查询共用同一把锁，
+                // 否则两处同时拿旧 refreshToken 续期，先成功的那个会被后失败的顶掉，
+                // 表现就是"签到成功后过一会儿 token 全废、查不到积分、显示没有签到权限"。
+                val ex = Gateway.locked { TraeAuthApi.exchangeToken(cred.refreshToken, reg) }
                 cred = cred.copy(accessToken = ex.accessToken, refreshToken = ex.refreshToken ?: cred.refreshToken,
                     expiresAt = ex.expiresAt ?: cred.expiresAt)
                 TraeAuthStore.updateTokens(ctx, cred)
@@ -231,12 +234,12 @@ object BatchCheckin {
                 TraeAuthStore.updateMeta(ctx, cred.toMeta())
             }
             // 先查状态再决定发不发 claim（照抄单账号路径的纪律）
-            val before = TraeUpstream.fetchCheckin(cred.accessToken, cred.uid, reg)
+            val before = TraeUpstream.fetchCheckinHealing(ctx, cred)
                 ?: return PerAccount(meta.uid, name, "fail", -1, "拉取签到状态失败（网络或上游异常）")
             if (before.checkedIn) return PerAccount(meta.uid, name, "already", before.credits, "")
             if (!before.enable) return PerAccount(meta.uid, name, "disabled", -1, "该账号未开放签到")
             val code = TraeUpstream.claimCheckin(cred.accessToken, cred.uid, reg)
-            val after = TraeUpstream.fetchCheckin(cred.accessToken, cred.uid, reg)
+            val after = TraeUpstream.fetchCheckinHealing(ctx, cred)
             when {
                 TraeUpstream.checkinSucceeded(before, after, code) ->
                     PerAccount(meta.uid, name, "ok", after!!.credits, "")

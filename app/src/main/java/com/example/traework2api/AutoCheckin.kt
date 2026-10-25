@@ -153,7 +153,7 @@ object AutoCheckin {
             runCatching {
                 val cred = TraeAuthStore.loadByUid(ctx, uid) ?: return@runCatching
                 if (cred.accessToken.isBlank()) return@runCatching
-                val st = TraeUpstream.fetchCheckin(cred.accessToken, uid, cred.region) ?: return@runCatching
+                val st = TraeUpstream.fetchCheckinHealing(ctx, cred) ?: return@runCatching
                 if (st.checkedIn || !st.enable) {
                     markDone(ctx, "trae:$uid")     // 已签 / 未开放 → 今天不用再管这个号
                     return@runCatching
