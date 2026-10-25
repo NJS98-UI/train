@@ -246,7 +246,9 @@ object QoderAuthStore {
                 .put("organizationTags", JSONArray().apply { c.organizationTags.forEach { put(it) } })
                 .put("dataPolicyAgreed", c.dataPolicyAgreed)
                 .put("isDataPolicyModifiable", c.isDataPolicyModifiable)
-                .put("pat", c.pat).put("jobToken", c.jobToken).put("jobRefreshToken", c.jobRefreshToken))
+                .put("pat", c.pat).put("jobToken", c.jobToken).put("jobRefreshToken", c.jobRefreshToken)
+                // 设备身份也要带走：不然换机/重装后抓包指纹丢了，只能重新派生成"本机派生"
+                .put("fingerprint", fingerprint(context, c.uid)?.let { encodeFingerprint(it) } ?: ""))
         }
         return JSONObject()
             .put("format", EXPORT_FORMAT).put("version", 1)
@@ -277,6 +279,9 @@ object QoderAuthStore {
                 dataPolicyAgreed = o.optBoolean("dataPolicyAgreed", false),
                 isDataPolicyModifiable = o.optBoolean("isDataPolicyModifiable", true),
             )
+            // 指纹是可选的：老备份没有这个字段，缺了就当"用本机派生"
+            o.optString("fingerprint", "").takeIf { it.isNotBlank() }
+                ?.let { raw -> decodeFingerprint(raw)?.let { setFingerprint(context, uid, it) } }
             val p = prefs(context)
             p.edit()
                 .putString(patKey(uid), encrypt(cred.pat))

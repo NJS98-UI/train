@@ -8,6 +8,21 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.13] - 2026-10-17
+
+### Fixed（账号导出完整性）
+- Qoder 导出补上**设备指纹**（`fingerprint` 字段）：以前导出只带 pat/jobToken/jobRefreshToken，
+  换机或重装后抓包指纹丢失，只能退回"本机派生"。导入时按需还原（老备份没这个字段照样能导）。
+
+### Audited（逐字段核对，2026-10-25）
+- Trae 导出：`uid / nickname / region / expiresAt / accessToken / refreshToken` + `activeUid`
+  —— 与 `TraeAuthStore.Cred` 字段**一一对应，无遗漏**。
+- Qoder 导出：`uid / name / email / mode / expiresAt / organizationId / organizationName /
+  organizationTags / dataPolicyAgreed / isDataPolicyModifiable / pat / jobToken / jobRefreshToken`
+  + `activeUid` + 本次补的 `fingerprint` —— 与 `QCred` 字段一一对应。
+- 已知边界：Trae 导入要求 `accessToken` 非空（只有 refreshToken 的账号导不进来）；
+  Qoder 导入要求 `pat` 或 `jobToken` 至少一个非空。两者都是"没令牌的账号本来就无法恢复"的如实体现。
+
 ## [0.7.12] - 2026-10-17
 
 ### Fixed（两个假警报，根因同一个：token 被拒）
