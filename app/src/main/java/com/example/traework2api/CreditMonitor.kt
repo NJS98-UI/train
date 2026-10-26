@@ -123,11 +123,16 @@ object CreditMonitor {
      *
      * 不用定时轮询：那是拿账号去刷上游接口，token 会被判废（见 DEFAULT_INTERVAL_SEC 注释）。
      */
-    fun noteForwarded(context: Context, backend: String, uid: String?) {
+    /**
+     * @param urgent 这次转发**失败了**。失败必须立刻判定换号 —— 不能让用户干等到
+     *   节流窗口（60 秒）过去才换，那正是"换号不积极"的体感来源。
+     *   成功时仍然节流：成功说明余额还够，没必要每次都查一遍。
+     */
+    fun noteForwarded(context: Context, backend: String, uid: String?, urgent: Boolean = false) {
         val now = System.currentTimeMillis()
         // **每个平台各自节流**：Trae 的请求不该压住 Qoder 的刷新（反之亦然）。
         val lastAt = if (backend == GatewayBackend.QODER) lastQoderPollAt else lastTraePollAt
-        if (now - lastAt < FORWARD_POLL_MIN_MS) return
+        if (!urgent && now - lastAt < FORWARD_POLL_MIN_MS) return
         if (backend == GatewayBackend.QODER) lastQoderPollAt = now else lastTraePollAt = now
         val app = context.applicationContext ?: context
         appCtx = app
@@ -137,10 +142,10 @@ object CreditMonitor {
                 //  - 走 Qoder → 只查 Qoder 的 uid，Trae 一次请求都不发
                 //  - 走 Trae  → 只查 Trae 的 uid，Qoder 一次请求都不发
                 val snap = if (backend == GatewayBackend.QODER) {
-                    val (qUid, remaining) = pollQoder(app, uid)
+                    val (qUid, remaining) = pollQoder(app, uid, forwardFailed = urgent)
                     Snapshot(null, null, qUid, remaining, isAutoSwitchEnabled(app), threshold(app))
                 } else {
-                    val (tUid, bal) = pollTrae(app, uid)
+                    val (tUid, bal) = pollTrae(app, uid, forwardFailed = urgent)
                     Snapshot(tUid, bal, null, null, isAutoSwitchEnabled(app), threshold(app))
                 }
                 latest = snap
@@ -178,7 +183,7 @@ object CreditMonitor {
      *  - 只有这个号**确认见底**（拿到确定额度且 ≤ 阈值）才去别的账号里找 —— 那正是换号的目的；
      *  - 换号只在**同一平台内**进行，绝不跨平台；换完返回新 uid，下一轮就只查新号。
      */
-    private fun pollTrae(ctx: Context, wantedUid: String?): Pair<String?, Long?> {
+    private fun pollTrae(ctx: Context, wantedUid: String?, forwardFailed: Boolean = false): Pair<String?, Long?> {
         // 用传进来的 uid（转发时实际用的那个），拿不到才回落到当前账号
         val uid = wantedUid?.takeIf { it.isNotBlank() } ?: TraeAuthStore.activeUid(ctx) ?: return null to null
         val cred = TraeAuthStore.loadByUid(ctx, uid) ?: return uid to null
@@ -186,13 +191,20 @@ object CreditMonitor {
         val token = Gateway.locked { TraeAuthApi.restartWithValidTokenFor(ctx, cred, skewSec = 3600L) }
             ?: cred.accessToken.takeIf { it.isNotBlank() }
         val bal = if (token.isNullOrBlank()) null else TraeUpstream.fetchUsage(token, cred.uid, cred.region)
-        // 判据保守：只有**拿到确定额度**且见底才换号；查不到（null）一律不换。
-        if (bal != null && bal <= threshold(ctx) && isAutoSwitchEnabled(ctx)) {
+        // 换号时机（积极但不下作）：
+        //  1) 拿到确定额度且见底 → 换；
+        //  2) 查不到额度（null）且本次是**转发失败后**触发的 → 也换（很可能这个号本身出问题了，
+        //     死守一个查不出数的号没有任何好处）。查得到数时仍按阈值判断，避免网络抖动误换。
+        val exhausted = bal != null && bal <= threshold(ctx)
+        // 查不到额度 **且这次转发就是失败的** → 视为该号不可用（查不出数还死守着没意义）。
+        // 查得到数时仍按阈值判断，避免一次网络抖动就换号。
+        val unusable = bal == null && forwardFailed
+        if ((exhausted || unusable) && isAutoSwitchEnabled(ctx)) {
             val next = pickTraeFunded(ctx, excludeUid = uid)
             if (next != null) {
                 TraeAuthStore.setActive(ctx, next.uid)
                 TraeAuthStore.syncRegionToActiveAccount(ctx)
-                Log.i(TAG, "Trae 积分见底($uid 余=$bal) → 换到 ${next.uid}(${next.nickname})")
+                Log.i(TAG, "Trae 换号($uid 余=$bal exhausted=$exhausted unusable=$unusable) → ${next.uid}(${next.nickname})")
                 // 换完立刻拿新号的最新余额（用户要的："换了另外一个号就刷另外一个号"）
                 val nCred = TraeAuthStore.loadByUid(ctx, next.uid)
                 val nTok = nCred?.let { Gateway.locked { TraeAuthApi.restartWithValidTokenFor(ctx, it, 3600L) } }
@@ -228,13 +240,14 @@ object CreditMonitor {
 
     // ---- Qoder ----
 
-    private fun pollQoder(ctx: Context, wantedUid: String?): Pair<String?, Double?> {
+    private fun pollQoder(ctx: Context, wantedUid: String?, forwardFailed: Boolean = false): Pair<String?, Double?> {
         val uid = wantedUid?.takeIf { it.isNotBlank() } ?: QoderAuthStore.activeUid(ctx) ?: return null to null
         val cred = QoderAuthStore.loadByUid(ctx, uid) ?: return uid to null
         val credits = fetchQoderCredits(ctx, cred)
         val remaining = credits?.remaining
         // 同 pollTrae 的判据：只有拿到确定额度且见底才在同一平台内换号
-        if (credits != null && !credits.hasCredit && isAutoSwitchEnabled(ctx)) {
+        val qUnusable = credits == null && forwardFailed
+        if ((credits != null && !credits.hasCredit || qUnusable) && isAutoSwitchEnabled(ctx)) {
             val next = pickQoderFunded(ctx, excludeUid = uid)
             if (next != null) {
                 QoderAuthStore.setActive(ctx, next.uid)

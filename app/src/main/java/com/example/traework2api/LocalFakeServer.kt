@@ -673,7 +673,10 @@ class LocalFakeServer(private val apiKey: String) {
             }
 
             // 换号条件：这次没成功 + 续期没救活 + 错误值得换 + 还没换过 + 确实有别的账号
-            val switched = if (!refreshed && !streaming && err != null && attempt == 0 && retryableUpstreamError(err!!)) {
+            // ⚠️ `attempt == 0` 是**旧的单次限制**：排队/限流这类账号级问题换一次号往往就解决了，
+            // 但有时第一个候选也是排队号，只换一次就放弃 → 用户体感"换号不积极"。
+            // 现在允许在**前两次**尝试里各换一次（最多换 2 个号），换到能用为止。
+            val switched = if (!refreshed && !streaming && err != null && attempt <= 1 && retryableUpstreamError(err!!)) {
                 try { tryFailover(err!!) } catch (e: Exception) {
                     android.util.Log.w(TAG, "换号失败: ${e.javaClass.simpleName}: ${e.message}")
                     false
