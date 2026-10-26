@@ -286,17 +286,17 @@ object QoderUpstream {
             onResult(null, "body:${e.javaClass.simpleName}")
             return
         }
-        val modelKey = upstreamBody.optJSONObject("model_config")?.optString("key", "")
+        // 每次尝试实际使用的模型 key：排队降级时会临时改它（请求体里的 model_config 同步改）
+        var modelKey = upstreamBody.optJSONObject("model_config")?.optString("key", "")
             ?: QoderModelCatalog.DEFAULT_KEY
-        val encoded = QoderCosyCrypto.encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
-        val encodedBodyStr = String(encoded, Charsets.US_ASCII)
-
         var jobToken = cred.jobToken
         var settled = false
         fun settle(usage: JSONObject?, err: String?) {
             if (!settled) { settled = true; onResult(usage, err) }
         }
 
+        var encoded = encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
+        var encodedBodyStr = String(encoded, Charsets.US_ASCII)
         for (attempt in 1..MAX_ATTEMPTS) {
             // 每次尝试都要新的 requestId / 时间戳 / 签名：上游按 (requestId, date) 防重放。
             val unixSeconds = (System.currentTimeMillis() / 1000).toString()
@@ -362,7 +362,25 @@ object QoderUpstream {
             val queued = queueWaitMs(raw)
             val retryable = code == 408 || code == 429 || code >= 500 || queued != null
             if (retryable && attempt < MAX_ATTEMPTS) {
-                val wait = queued ?: retryAfterMs(retryAfter) ?: ((1L shl (attempt - 1)) * 1000L)
+                if (queued != null) {
+                    // 排队/资源受限：**别干等 30 秒**，直接换一个实测不排队的模型重试。
+                    // 客户端指定了具体模型时不擅自更换（那会让用户拿到错模型的回答），
+                    // 只有当前用的就是排队重灾区（auto/ultimate 等）时才降级。
+                    val fb = QoderModelCatalog.QUEUE_FALLBACK_KEYS.firstOrNull { it != modelKey }
+                    if (fb != null && (modelKey == "auto" || modelKey == "ultimate" || modelKey == "performance")) {
+                        android.util.Log.i(TAG, "上游排队($modelKey, ${queued}ms)，降级到 $fb 重试")
+                        modelKey = fb
+                        // 请求体里的 model_config.key 必须跟着换，否则上游仍按旧 key 路由
+                        upstreamBody.optJSONObject("model_config")?.put("key", fb)
+                        encoded = encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
+                        encodedBodyStr = String(encoded, Charsets.US_ASCII)
+                        continue
+                    }
+                    // 用户明确要这个模型 → 等一小会儿再试一次，但最多等 5 秒
+                    sleepQuietly(queued.coerceAtMost(5_000L))
+                    continue
+                }
+                val wait = retryAfterMs(retryAfter) ?: ((1L shl (attempt - 1)) * 1000L)
                 android.util.Log.i(TAG, "上游 $code (attempt $attempt/$MAX_ATTEMPTS)，${wait}ms 后重试")
                 sleepQuietly(wait.coerceAtMost(MAX_RETRY_WAIT_MS))
                 continue
@@ -633,21 +651,45 @@ object QoderUpstream {
      * 上游排队/过载时会在 body 里给等待时间：
      * `{"code":"10605","retryAfterMs":ms}` 或 `{"queue":{"isQueued":true,"waitTime":ms}}`。
      */
+    /**
+     * 上游"排队/资源受限"的等待毫秒；不是这类错误返回 null。
+     *
+     * ⚠️ 这里踩过坑（实测 2026-10-26）：`auto` 等热门模型的 403 响应长这样 ——
+     * `{"code":"403","message":"{\"code\":\"10605\",\"message\":
+     *   \"{\\\"isQueued\\\":true,\\\"modelKey\\\":\\\"auto\\\",...,
+     *     \\\"retryAfterSeconds\\\":30,\\\"subCode\\\":\\\"RESOURCE_LIMIT\\\"}\"}"}`
+     *
+     * 也就是关键信息在**多层转义的 JSON 字符串**里，顶层根本没有 `queue` 字段。
+     * 旧实现只看顶层 `optJSONObject("queue")`，于是永远返回 null →
+     * 被当成不可重试的致命错误直接报给客户端（"一次都用不了"就是这么来的）。
+     *
+     * 现在把整串原文当文本扫：只要出现 `isQueued:true` 或 `subCode:RESOURCE_LIMIT`，
+     * 就按"可重试"处理，并从 `retryAfterSeconds` / `waitTime` 里取等待时间。
+     */
     private fun queueWaitMs(raw: String): Long? {
-        val o = try { JSONObject(raw) } catch (_: Exception) { return null }
-        val queue = o.optJSONObject("queue")
-        if (queue != null && queue.optBoolean("isQueued", false)) {
-            var ms = queue.optLong("waitTime", 0L)
-            if (ms <= 0) ms = o.optLong("retryAfterMs", 0L)
-            if (ms <= 0) ms = 2000L
-            return ms
+        val looksQueued = raw.contains("\"isQueued\":true") ||
+            raw.contains("RESOURCE_LIMIT") ||
+            raw.contains("\"code\":\"10605\"") ||
+            raw.contains("10605")
+        if (!looksQueued) {
+            // 仍然兼容"规规矩矩给了 queue 对象"的形状
+            val o = try { JSONObject(raw) } catch (_: Exception) { return null }
+            val queue = o.optJSONObject("queue")
+            if (queue != null && queue.optBoolean("isQueued", false)) {
+                val ms = queue.optLong("waitTime", 0L)
+                return if (ms > 0) ms else 2_000L
+            }
+            return null
         }
-        if (o.optString("code", "") == "10605") {
-            var ms = o.optLong("retryAfterMs", 0L)
-            if (ms <= 0) ms = 2000L
-            return ms
+        // 从转义文本里抠秒数：retryAfterSeconds / waitTime / retryAfterMs 都认
+        fun num(key: String): Long? {
+            val m = Regex("\\*\"" + key + "\\*\"\\s*:\\s*(\\d+)").find(raw) ?: return null
+            return m.groupValues[1].toLongOrNull()
         }
-        return null
+        num("retryAfterSeconds")?.let { return (it * 1000L).coerceAtLeast(1_000L) }
+        num("waitTime")?.let { return (it * 1000L).coerceAtLeast(1_000L) }
+        num("retryAfterMs")?.let { return it.coerceAtLeast(1_000L) }
+        return 2_000L
     }
 
     /** `Retry-After: 5` → 5000ms（只认秒，与参考实现 `ParseDuration(+"s")` 一致）。 */

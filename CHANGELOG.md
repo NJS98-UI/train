@@ -8,6 +8,28 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.29] - 2026-10-26
+
+### Fixed（"一次都用不了"的真正原因：模型排队被当成致命错误）
+- 实测 `auto` 模型的 403 响应：
+  `{"code":"403","message":"{\"code\":\"10605\",...\"isQueued\":true,\"modelKey\":\"auto\",` +
+  `\"retryAfterSeconds\":30,\"subCode\":\"RESOURCE_LIMIT\"}"}`
+  —— 关键信息在**多层转义的 JSON 字符串**里，顶层没有 `queue` 字段。
+- `queueWaitMs()` 旧实现只看顶层 `optJSONObject("queue")`，永远返回 null →
+  排队被当作**不可重试的致命错误**直接抛给客户端。这就是"官方 App 能用、转发一次都用不了"。
+  现在把原文当文本扫（`isQueued:true` / `RESOURCE_LIMIT` / `10605`），并抠出等待秒数。
+- **默认模型从 `auto` 改为 `qwen3-coder-plus`**：`auto` 是排队重灾区，
+  客户端不指定模型时（很常见）必然撞上。三个候选实测均可直接使用。
+- 排队时**不干等 30 秒**：若当前模型是 `auto`/`ultimate`/`performance`，
+  自动降级到 `qwen3-coder-plus` → `claude-sonnet-4` → `deepseek-v3` 重试，
+  请求体里的 `model_config.key` 同步改写。用户显式指定的模型不擅自更换，只短暂重试。
+
+### 实测记录（两个账号，非推测）
+- A（100 credits，`used:0`）与 B（246 credits）：PAT 换 jobToken、额度、活动列表、**COSY 转发**全部正常，
+  A 与 B 各发 5 轮（hi / 中文 / analyze / hello）**全部成功**。账号本身没有任何限制。
+- `X-Model-Key` = `auto` / `ultimate` / `gmodel` → 403 RESOURCE_LIMIT（排队）
+  `qwen3-coder-plus` / `claude-sonnet-4` / `deepseek-v3` → 正常
+
 ## [0.7.28] - 2026-10-17
 
 ### Changed
