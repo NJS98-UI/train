@@ -8,6 +8,26 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.30] - 2026-10-26
+
+### Fixed
+- **领取文案如实化**：现在只剩 `VIEW_DETAILS` + `benefit=null` 的社区活动（不发 Credits），
+  对着它们说"已领取 2 条"会让人以为白拿了两份额度。改成
+  「无积分活动（2 条均为查看类，不发 Credits）」，只有真的带 Credits 的活动才说"已领取 N 条"。
+- **排队降级覆盖所有排队模型**：实测此刻 `auto`/`ultimate`/`performance`/`efficient`/
+  `gmodel`/`dfmodel`/`qfmodel` **全部**返回 `RESOURCE_LIMIT`，只有
+  `qwen3-coder-plus`/`claude-sonnet-4`/`deepseek-v3` 可用。
+  降级判据从"白名单模型"改为"当前模型不在可用集合里就降级"。
+
+### 实测记录（2026-10-26 06:34 UTC，两个账号）
+- **领取链路完全正常**：`POST /sash/api/v1/me/campaigns/{id}/claim` → **200 + `replayed:true`**，
+  两个账号各 2 条活动都成功返回。
+- 但活动本身 **`benefit: null`、`actionType: VIEW_DETAILS`**（10-22 ~ 10-30 的社区活动），
+  **不发任何 Credits**。此前见过的「每天领 100 Credits」(`CLAIM_BENEFIT` + `kind=CREDITS`)
+  当前**已不在活动列表里** —— 是服务端侧的活动配置变了，不是 App 领不到。
+- 模型可用性实测：`qwen3-coder-plus` / `claude-sonnet-4` / `deepseek-v3` = 可用；
+  其余含两个免费模型 = `RESOURCE_LIMIT` 排队。
+
 ## [0.7.29] - 2026-10-26
 
 ### Fixed（"一次都用不了"的真正原因：模型排队被当成致命错误）

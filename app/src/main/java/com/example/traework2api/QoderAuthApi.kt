@@ -638,8 +638,14 @@ object QoderAuthApi {
             // CLAIM_BENEFIT 都没有，到点后才出现，所以调用方必须重试（见 AutoCheckin）。
             val allClaimed = campaigns.isNotEmpty() &&
                 campaigns.all { it.claimStatus.equals("CLAIMED", true) }
+            // 只有"带 Credits 奖励"的活动才值得说"已领取 N 条"。
+            // 实测（2026-10-26）：现在只剩 VIEW_DETAILS + benefit=null 的社区活动，
+            // 对着它们说"已领取 2 条"会让人以为白拿了 2 份额度 —— 必须如实说"没有可领的积分活动"。
+            val creditCampaigns = campaigns.count { it.grantsCredits }
             val why = when {
-                allClaimed -> "已领取 ${campaigns.size} 条"
+                creditCampaigns > 0 && allClaimed -> "已领取 $creditCampaigns 条"
+                creditCampaigns == 0 && campaigns.isNotEmpty() ->
+                    "无积分活动（${campaigns.size} 条均为查看类，不发 Credits）"
                 campaigns.isNotEmpty() -> "无待领活动（${campaigns.size} 条均已处理）"
                 cred.mode == MODE_GLOBAL -> "无可见活动"
                 else -> "今日无可领活动"

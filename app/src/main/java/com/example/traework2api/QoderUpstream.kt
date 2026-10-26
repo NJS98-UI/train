@@ -366,8 +366,11 @@ object QoderUpstream {
                     // 排队/资源受限：**别干等 30 秒**，直接换一个实测不排队的模型重试。
                     // 客户端指定了具体模型时不擅自更换（那会让用户拿到错模型的回答），
                     // 只有当前用的就是排队重灾区（auto/ultimate 等）时才降级。
+                    // 实测（2026-10-26）：auto/ultimate/performance/efficient/gmodel/dfmodel/qfmodel
+                    // **全部**返回 RESOURCE_LIMIT 排队，只有下面三个可用。
+                    // 所以不按"白名单模型"判断，而是：当前模型不在可用集合里就降级。
                     val fb = QoderModelCatalog.QUEUE_FALLBACK_KEYS.firstOrNull { it != modelKey }
-                    if (fb != null && (modelKey == "auto" || modelKey == "ultimate" || modelKey == "performance")) {
+                    if (fb != null && modelKey !in QoderModelCatalog.QUEUE_FALLBACK_KEYS) {
                         android.util.Log.i(TAG, "上游排队($modelKey, ${queued}ms)，降级到 $fb 重试")
                         modelKey = fb
                         // 请求体里的 model_config.key 必须跟着换，否则上游仍按旧 key 路由
