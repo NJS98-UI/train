@@ -110,9 +110,14 @@ object QoderModelCatalog {
     const val DEFAULT_KEY = "qwen3-coder-plus"
 
     /**
-     * 排队时的降级候选（按顺序试，全部实测可直接用、不排队）。
+     * 实测「不排队」的模型清单（仅供参考，**不用于自动降级**）。
      *
-     * 只在**确认是排队/资源受限**时才降级 —— 别的错误（鉴权、参数）降级没有意义。
+     * 2026-10-26 实测：`qwen3-coder-plus` / `claude-sonnet-4` / `deepseek-v3` 可直接用；
+     * `auto` / `ultimate` / `performance` / `efficient` / `gmodel` / `dfmodel` / `qfmodel`
+     * 对**免费额度账号**会永久 `RESOURCE_LIMIT` 排队。
+     *
+     * ⚠️ 用户明确要求**不要自动降级**：换模型会让客户端拿到不是它要的模型的回答。
+     * 排队时只如实报原因 + 支持手动重试。
      */
     val QUEUE_FALLBACK_KEYS = listOf("qwen3-coder-plus", "claude-sonnet-4", "deepseek-v3")
 

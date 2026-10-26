@@ -286,8 +286,8 @@ object QoderUpstream {
             onResult(null, "body:${e.javaClass.simpleName}")
             return
         }
-        // 每次尝试实际使用的模型 key：排队降级时会临时改它（请求体里的 model_config 同步改）
-        var modelKey = upstreamBody.optJSONObject("model_config")?.optString("key", "")
+        // 本次请求使用的模型 key（只用于签名头与报错文案；**不会**被自动改写 —— 见排队处理）
+        val modelKey = upstreamBody.optJSONObject("model_config")?.optString("key", "")
             ?: QoderModelCatalog.DEFAULT_KEY
         var jobToken = cred.jobToken
         var settled = false
@@ -295,8 +295,8 @@ object QoderUpstream {
             if (!settled) { settled = true; onResult(usage, err) }
         }
 
-        var encoded = QoderCosyCrypto.encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
-        var encodedBodyStr = String(encoded, Charsets.US_ASCII)
+        val encoded = QoderCosyCrypto.encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
+        val encodedBodyStr = String(encoded, Charsets.US_ASCII)
         for (attempt in 1..MAX_ATTEMPTS) {
             // 每次尝试都要新的 requestId / 时间戳 / 签名：上游按 (requestId, date) 防重放。
             val unixSeconds = (System.currentTimeMillis() / 1000).toString()
@@ -359,34 +359,31 @@ object QoderUpstream {
                 }
             }
 
+            // ⚠️ 排队/资源受限（RESOURCE_LIMIT）**不做自动降级**（用户 2026-10-26 明确要求）：
+            // 换模型会让用户拿到"不是他要的那个模型"的回答，属于自作主张。
+            // 实测差异：有的账号（如免费额度号）对免费模型**永久**排队，换模型只是绕开症状。
+            // 所以这里只做两件事：短暂重试 + 把**真实原因**说清楚。
             val queued = queueWaitMs(raw)
-            val retryable = code == 408 || code == 429 || code >= 500 || queued != null
+            val retryable = code == 408 || code == 429 || code >= 500 ||
+                (queued != null && code != 403)   // 403 是判定结果，重试没有意义
             if (retryable && attempt < MAX_ATTEMPTS) {
-                if (queued != null) {
-                    // 排队/资源受限：**别干等 30 秒**，直接换一个实测不排队的模型重试。
-                    // 客户端指定了具体模型时不擅自更换（那会让用户拿到错模型的回答），
-                    // 只有当前用的就是排队重灾区（auto/ultimate 等）时才降级。
-                    // 实测（2026-10-26）：auto/ultimate/performance/efficient/gmodel/dfmodel/qfmodel
-                    // **全部**返回 RESOURCE_LIMIT 排队，只有下面三个可用。
-                    // 所以不按"白名单模型"判断，而是：当前模型不在可用集合里就降级。
-                    val fb = QoderModelCatalog.QUEUE_FALLBACK_KEYS.firstOrNull { it != modelKey }
-                    if (fb != null && modelKey !in QoderModelCatalog.QUEUE_FALLBACK_KEYS) {
-                        android.util.Log.i(TAG, "上游排队($modelKey, ${queued}ms)，降级到 $fb 重试")
-                        modelKey = fb
-                        // 请求体里的 model_config.key 必须跟着换，否则上游仍按旧 key 路由
-                        upstreamBody.optJSONObject("model_config")?.put("key", fb)
-                        encoded = QoderCosyCrypto.encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
-                        encodedBodyStr = String(encoded, Charsets.US_ASCII)
-                        continue
-                    }
-                    // 用户明确要这个模型 → 等一小会儿再试一次，但最多等 5 秒
-                    sleepQuietly(queued.coerceAtMost(5_000L))
-                    continue
-                }
-                val wait = retryAfterMs(retryAfter) ?: ((1L shl (attempt - 1)) * 1000L)
+                val wait = (queued ?: retryAfterMs(retryAfter) ?: ((1L shl (attempt - 1)) * 1000L))
+                    .coerceAtMost(MAX_RETRY_WAIT_MS)
                 android.util.Log.i(TAG, "上游 $code (attempt $attempt/$MAX_ATTEMPTS)，${wait}ms 后重试")
-                sleepQuietly(wait.coerceAtMost(MAX_RETRY_WAIT_MS))
+                sleepQuietly(wait)
                 continue
+            }
+
+            if (queued != null) {
+                // 如实报：哪个模型、排多久、当前账号什么情况。不说"网络错误"这种含糊话。
+                val secs = (queued / 1000L).coerceAtLeast(1L)
+                val msg = "上游资源紧张：模型「$modelKey」正在排队（约 ${secs} 秒），" +
+                    "当前账号未被允许进入队列。可换其它模型，或在账号页切换到别的 Qoder 账号。"
+                android.util.Log.w(TAG, "上游排队最终失败 model=$modelKey: ${raw.take(200)}")
+                emitError(out, msg)
+                out("data: [DONE]\n\n")
+                settle(null, "queued:$modelKey")
+                return
             }
 
             android.util.Log.w(TAG, "上游最终失败 $code: ${raw.take(200)}")
