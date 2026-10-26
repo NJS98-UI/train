@@ -295,7 +295,7 @@ object QoderUpstream {
             if (!settled) { settled = true; onResult(usage, err) }
         }
 
-        var encoded = encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
+        var encoded = QoderCosyCrypto.encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
         var encodedBodyStr = String(encoded, Charsets.US_ASCII)
         for (attempt in 1..MAX_ATTEMPTS) {
             // 每次尝试都要新的 requestId / 时间戳 / 签名：上游按 (requestId, date) 防重放。
@@ -372,7 +372,7 @@ object QoderUpstream {
                         modelKey = fb
                         // 请求体里的 model_config.key 必须跟着换，否则上游仍按旧 key 路由
                         upstreamBody.optJSONObject("model_config")?.put("key", fb)
-                        encoded = encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
+                        encoded = QoderCosyCrypto.encodeBody(upstreamBody.toString().toByteArray(Charsets.UTF_8))
                         encodedBodyStr = String(encoded, Charsets.US_ASCII)
                         continue
                     }
