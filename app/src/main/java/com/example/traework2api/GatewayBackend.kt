@@ -69,8 +69,24 @@ object GatewayBackend {
     // 路由
     // ------------------------------------------------------------------
 
+    /** 该模型名是否属于 Trae 目录（按 `id` 命中）。 */
+    fun isTraeModel(model: String): Boolean {
+        val m = model.trim()
+        if (m.isEmpty()) return false
+        val arr = ModelsRepo.current()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            if (o.optString("id", "").equals(m, ignoreCase = true)) return true
+        }
+        return false
+    }
+
     /**
      * 这个模型该走哪个上游。
+     *
+     * 同名模型两边都有时 **Trae 优先**（与类注释、老用户行为一致）。旧代码是先看
+     * [isQoderModel] 再看兜底 Trae，等于把同名模型悄悄改派给 Qoder —— 那条链路要
+     * COSY 签名 + 排队，响应明显更慢，这就是"很难刷出来"的一部分来源。
      *
      * @param model 客户端请求里的 `model` 字段（空串 = 没指定，按 Trae 兜底）
      */
@@ -83,7 +99,11 @@ object GatewayBackend {
             when {
                 q && !t -> QODER
                 !q && t -> TRAE
-                q && t -> if (isQoderModel(model)) QODER else TRAE
+                q && t -> when {
+                    isTraeModel(model) -> TRAE
+                    isQoderModel(model) -> QODER
+                    else -> TRAE
+                }
                 else -> TRAE
             }
         }

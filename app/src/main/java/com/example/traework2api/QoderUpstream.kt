@@ -34,8 +34,12 @@ object QoderUpstream {
     /** 参考实现 `callUpstream` 的 maxAttempts。 */
     private const val MAX_ATTEMPTS = 3
 
-    /** 重试等待上限（参考实现 30s）。 */
-    private const val MAX_RETRY_WAIT_MS = 30_000L
+    /**
+     * 可重试错误的最长等待。参考实现用 30s，但那是"一次请求等到底"的策略；
+     * 这里是本地网关，客户端正挂在 SSE 上等首字，睡 30 秒等于整条链路假死。
+     * 2s 内能起来就重试，起不来立刻把错误抛给 [LocalFakeServer] 去换号。
+     */
+    private const val MAX_RETRY_WAIT_MS = 2_000L
 
     /** 客户端没给 max_tokens 时的默认值（与参考实现一致）。 */
     private const val DEFAULT_MAX_TOKENS = 32_000
@@ -319,7 +323,9 @@ object QoderUpstream {
             } catch (e: Exception) {
                 android.util.Log.w(TAG, "上游传输异常(attempt $attempt): ${e.javaClass.simpleName}: ${e.message}")
                 if (attempt < MAX_ATTEMPTS) {
-                    sleepQuietly(attempt * 1000L)
+                    // 传输层异常（连接被拒/DNS/重置）几乎都是立即失败，睡 1s/2s 只是纯加延迟；
+                    // 给 100ms 让瞬时抖动缓一下即可，真正的退避交给上层换号。
+                    sleepQuietly(100L)
                     continue
                 }
                 emitError(out, "上游连接失败: ${e.javaClass.simpleName}")
@@ -556,6 +562,8 @@ object QoderUpstream {
         val data = StringBuilder()
         var error: String? = null
         var stopped = false
+        val startedAt = System.currentTimeMillis()
+        var firstChunk = true
         val indexer = ToolIndexer()
 
         fun flush(): Boolean {
@@ -583,9 +591,22 @@ object QoderUpstream {
                 if (msg.isNotEmpty()) { error = msg; return false }
             }
             chunk.optJSONObject("usage")?.let(onUsage)
-            indexer.remap(chunk)
-            chunk.put("model", clientModel)
-            out("data: ${chunk.toString()}\n\n")
+            val remapped = indexer.remap(chunk)
+            if (firstChunk) {
+                firstChunk = false
+                android.util.Log.i(TAG, "首字 ${System.currentTimeMillis() - startedAt}ms")
+            }
+            // 快路径：上游 chunk 不需要改写时**原样透传**，只在最前面注入 `model`
+            // （Qoder 不返 model，客户端需要）。SSE 每个 token 来一次，省掉整块 JSON 的
+            // 解析后再序列化，在低端机上是能感觉到的。
+            val trimmed = envBody.trim()
+            val wire = if (!remapped && !chunk.has("model") && trimmed.startsWith("{\"")) {
+                "{\"model\":${JSONObject.quote(clientModel)}," + trimmed.substring(1)
+            } else {
+                chunk.put("model", clientModel)
+                chunk.toString()
+            }
+            out("data: $wire\n\n")
             return true
         }
 
@@ -618,8 +639,10 @@ object QoderUpstream {
         private var cur = 0
         private var seen = false
 
-        fun remap(chunk: JSONObject) {
-            val choices = chunk.optJSONArray("choices") ?: return
+        /** @return 是否改写了 chunk（没改就可以原样透传，省一次序列化）。 */
+        fun remap(chunk: JSONObject): Boolean {
+            val choices = chunk.optJSONArray("choices") ?: return false
+            var changed = false
             for (ci in 0 until choices.length()) {
                 val delta = choices.optJSONObject(ci)?.optJSONObject("delta") ?: continue
                 val tcs = delta.optJSONArray("tool_calls") ?: continue
@@ -628,9 +651,11 @@ object QoderUpstream {
                     if (tc.optString("id", "").isNotEmpty()) {
                         if (seen) cur++ else seen = true
                     }
+                    if (tc.optInt("index", -1) != cur) changed = true
                     tc.put("index", cur)
                 }
             }
+            return changed
         }
     }
 

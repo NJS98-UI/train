@@ -151,7 +151,10 @@ object QoderCheckin {
         val results = raw.map { (uid, r) ->
             PerAccount(uid, names[uid] ?: uid, r.status, r.amount, r.message)
         }
-        for (p in results) if (p.status == "ok") markClaimed(ctx, p.uid)
+        // ok = 本次真的领到；already = 今天已经领过/没有可领 —— 两种都算"这个号今天处理完了"。
+        // 只记 ok 会让已领的号每天都被当成"没领"重复补跑（0.7.27 的说明写的是两种都记，
+        // 代码只记了 ok，这里对齐）。
+        for (p in results) if (p.status == "ok" || p.status == "already") markClaimed(ctx, p.uid)
         val today = today()
         prefs(ctx).edit()
             .putString(KEY_LAST_RUN_DATE, today)

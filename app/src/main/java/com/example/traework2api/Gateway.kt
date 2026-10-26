@@ -33,6 +33,13 @@ object Gateway {
      */
     private val tokenLock = Any()
 
+    /**
+     * Qoder 的凭证锁。**必须和 Trae 的分开**：两边是两套 token、两套上游，
+     * 共用一把锁时，Trae 的续期/换号会把 Qoder 的转发整个卡住（反之亦然）——
+     * 表现就是"一个后端的慢请求把另一个后端也拖成不响应"。
+     */
+    private val qoderLock = Any()
+
     @Volatile
     private var server: LocalFakeServer? = null
 
@@ -40,6 +47,9 @@ object Gateway {
 
     /** 供 MainActivity 的主动续期复用同一把锁（别再加第二把：轮换只允许一个续期在跑）。 */
     fun <T> locked(block: () -> T): T = synchronized(tokenLock) { block() }
+
+    /** Qoder 侧的串行段（jobToken 续期同样是轮换的，但只约束 Qoder 自己的链路）。 */
+    fun <T> lockedQoder(block: () -> T): T = synchronized(qoderLock) { block() }
 
     /**
      * 本地 API Key（与上游 access_token 是两套）。
@@ -187,8 +197,8 @@ object Gateway {
         // `auto` 时按模型名路由：Qoder 目录里的模型走 COSY，其余走 Trae。
         s.backendForModelProvider = { model -> GatewayBackend.routeFor(app, model) }
         s.qoderCredProvider = {
-            locked<QoderAuthStore.QCred?> {
-                val cred = QoderAuthStore.load(app) ?: return@locked null
+            lockedQoder<QoderAuthStore.QCred?> {
+                val cred = QoderAuthStore.load(app) ?: return@lockedQoder null
                 // 转发前续期：jobToken 是短时的，服务长驻不能只靠登录时那一个。
                 val jt = QoderAuthApi.validJobTokenFor(app, cred, SIXTY_MINUTES_MS) ?: cred.jobToken
                 if (jt.isBlank()) null else cred.copy(jobToken = jt)
@@ -198,16 +208,16 @@ object Gateway {
             val next = QoderAuthStore.list(app).firstOrNull { it.uid != failedUid }
                 ?: return@qoderFailover null
             android.util.Log.i(TAG, "Qoder 转发失败($err)，自动换到账号 ${next.uid}")
-            locked<QoderAuthStore.QCred?> {
+            lockedQoder<QoderAuthStore.QCred?> {
                 QoderAuthStore.setActive(app, next.uid)
-                val c = QoderAuthStore.load(app) ?: return@locked null
+                val c = QoderAuthStore.load(app) ?: return@lockedQoder null
                 val jt = QoderAuthApi.validJobTokenFor(app, c, SIXTY_MINUTES_MS) ?: c.jobToken
                 if (jt.isBlank()) null else c.copy(jobToken = jt)
             }
         }
         s.qoderRollback = { originalUid ->
             android.util.Log.i(TAG, "Qoder 换号后仍失败，切回原账号 $originalUid")
-            locked { QoderAuthStore.setActive(app, originalUid) }
+            lockedQoder { QoderAuthStore.setActive(app, originalUid) }
         }
         server = s
         s.start()

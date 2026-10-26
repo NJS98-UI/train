@@ -8,6 +8,36 @@ UI 规范看 `docs/UI现状清单.md`，本文件只是改动流水。（原引�
 
 ---
 
+## [0.7.33] - 2026-10-26
+
+### Fixed（Qoder「领取不了」的根因）
+- **活动列表加身份档位阶梯**（`QoderAuthApi.loadCampaigns`）：缺桌面端身份头时
+  `GET /sash/api/v1/me/campaigns` **不报错**，只回 `showCampaign=false, campaigns=[]`（HTTP 200），
+  于是被当成"今天没活动"。现在普通档空了会升到桌面档（`UA: Qoder` + `Cosy-Machine*`）复核，
+  哪一档真出活动就按国内/国际分别记住，下次不再多打一次上游。
+- **claim 与 list 用同一档身份**：以前 claim 走另一套头，列表看到了活动也可能领不动。
+- **解析更宽容**：支持 `data` 包裹、`campaignKey` 作为活动 id 兜底、`showCampaign` 原样带出。
+- **删掉 3 轮 × 2 秒的空转重试**：批量领号时这段 sleep 纯属白等十几秒；
+  列表的动态性交给定时任务重试。
+- **`already` 也记为"今天已领"**（`QoderCheckin.runAll`）：以前只记 `ok`，
+  已领的号每天都被当成没领、反复补跑（0.7.27 的说明写的是两种都记）。
+- **诊断页双档对照**：`diagnose` 对普通/桌面两档各请求一次并打印
+  `showCampaign` / 条数 / 原文，能直接看出"上游真没活动"还是"被静默隐藏"。
+
+### Fixed（转发慢 / 很难刷出来）
+- **`auto` 按模型路由时 Trae 优先**（`GatewayBackend.routeFor`）：同名模型两边都有时，
+  旧代码先判 Qoder，把老用户的请求悄悄改派到要 COSY 签名 + 排队的链路。现在先判 Trae，
+  与类注释和老行为一致。
+- **Qoder / Trae 凭证锁拆开**（`Gateway.lockedQoder`）：原来共用一把锁，
+  一个后端的续期/换号会把另一个后端的转发整个卡住。
+- **本地 SSE 关掉 Nagle**（`LocalFakeServer`：`sock.tcpNoDelay = true`）：
+  逐 token 的小包不再被延迟合包，首字更快落地。
+- **Qoder 重试等待 30s → 2s**：客户端挂在 SSE 上等首字时，睡 30 秒等于整条链路假死；
+  超时就立刻把错误交给上层换号。传输异常的重试间隔也从 1s/2s 降到 100ms。
+- **SSE chunk 原样透传**：不需要改写 tool_call index 时，只在最前面注入 `model`，
+  不再每 token 都"解析整块 JSON 再序列化一遍"。
+- **新增首字耗时日志**：`QoderUpstream` 每个请求打一行 `首字 Nms`，便于判断慢在本地还是上游。
+
 ## [0.7.32] - 2026-10-26
 
 ### Fixed（换号不积极）

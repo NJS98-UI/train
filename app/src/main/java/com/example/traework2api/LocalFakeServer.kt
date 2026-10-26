@@ -419,6 +419,10 @@ class LocalFakeServer(private val apiKey: String) {
             // 读超时：请求行/头是**逐字节**读的（[readLineRaw]），客户端建连后只要慢慢发包、
             // 或干脆不发，就能永久占住一个连接线程。15s 足够任何正常客户端把请求发完。
             try { sock.soTimeout = 15_000 } catch (_: Exception) {}
+            // SSE 是大量**小包**（每个 chunk 一次 write）。Nagle 会对小包做延迟合包（Android 上
+            // 最长可到 ~200ms），而首次响应本来就小 —— 用户感知就是"转半天不吐字"。
+            // 本机回环上合包没有收益，直接关掉。
+            try { sock.tcpNoDelay = true } catch (_: Exception) {}
             val input = sock.getInputStream()
             // 请求行/头逐字节读到 CRLF 为止：不用 BufferedReader，因为它会预读一批字节
             // 进自己的缓冲区，body 再从底层读就会缺一段（body 必须按 Content-Length 字节精确读）。

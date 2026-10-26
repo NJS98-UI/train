@@ -38,6 +38,25 @@ object QoderAuthApi {
     // 列表 GET /sash/api/v1/me/campaigns?forceRefresh=true；领取 POST .../campaigns/{id}/claim（body {}，幂等）。
     private const val EP_CAMPAIGNS = "/sash/api/v1/me/campaigns"
 
+    /**
+     * 活动列表的请求身份档位。**这是「领取不了」的关键开关**。
+     *
+     * 两组互相矛盾的现场证据，所以做成**运行时升降级**而不是二选一写死：
+     *  - 2026-10-24 本机对照：同一 jobToken，`ClientType=10` + 普通头 → 活动正常下发；
+     *  - 2026-09-30 qoder2api-hub 用官方桌面端 `main.log` 对照：**缺桌面端身份头时服务端
+     *    不报错、直接返回空活动列表**（`showCampaign=false, campaigns=[]`），
+     *    带齐 `User-Agent: Qoder` + `Cosy-ClientType: 10` + `Cosy-Machine*` 才下发。
+     *
+     * 空列表是**静默失败**（HTTP 200），所以只能先按普通身份问一次，拿到空列表且
+     * `showCampaign` 不为 true 时再升到桌面端身份问一次；哪一档真的出活动就记住哪一档
+     * （按国内/国际分别记），下次直接用，不再白白多打一次上游。
+     */
+    private const val VARIANT_MINIMAL = "minimal"
+    private const val VARIANT_DESKTOP = "desktop"
+
+    private const val PREFS = "traework2api_prefs"
+    private const val KEY_VARIANT = "qoder_campaign_variant_"
+
     // 官方模型目录（带真实 price_factor）。实测：这两个路径在所有 openapi 主机上
     // 未鉴权时都返回 **401**（=路由存在，只是缺 token），而 /api/v2/models、
     // /algo/api/v1/model/list 之类一律 404。两个都试，谁先回出可解析的目录用谁。
@@ -278,8 +297,8 @@ object QoderAuthApi {
     fun fetchCredits(jt: String, mode: String): QCredits? {
         if (jt.isBlank()) return null
         return try {
-            // 用量查询是普通鉴权接口，不需要机器身份（传 null 即不带头）
-            var root = JSONObject(getForCampaigns(openApiBase(mode) + EP_USAGE, jt, mode, null))
+            // 用量查询是普通鉴权接口，不需要机器身份（传 null 即不带头，走最小档）
+            var root = JSONObject(getWithIdentity(openApiBase(mode) + EP_USAGE, jt, VARIANT_MINIMAL, null))
             // 部分返回把内容裹在 data 下；探测不到已知键时再解一层。
             if (!root.has("userQuota") && !root.has("personalQuota") &&
                 !root.has("isQuotaExceeded") && root.has("data")
@@ -409,23 +428,26 @@ object QoderAuthApi {
     }
 
     /**
-     * 国际版请求要带**真实**设备指纹；国内版绝不能带。
+     * 活动接口的身份头。**普通档与桌面档的区别就在这几个头**（见 [VARIANT_DESKTOP]）。
      *
-     * 社区单变量对照实验（Qoder-2API-Go，2026-10-13）：
-     *  - 国内版：带自造指纹 → 不下发活动；不带 → 正常下发 ✅
-     *  - 国际版：不带 → 不下发；带官方客户端真实指纹 → 正常下发 ✅；自造指纹无效
-     * 所以：CN 走干净请求，Global 仅在**回填了真实指纹**时才加 cosy-machine* 头。
+     * 官方桌面端（`main.log` 实测）用的是：
+     * `User-Agent: Qoder` + `Cosy-Version: 0.4.x` + `Cosy-ClientType: 10` + `Cosy-Machine*`。
+     * 缺这些头时服务端**不报错、直接返回空活动列表**，这就是「桌面端能领、App 领不了」的由来。
      */
     private fun applyMachineHeaders(
         b: Request.Builder,
-        mode: String,
+        variant: String,
         id: QoderMachine.Identity?,
     ): Request.Builder {
-        if (mode != MODE_GLOBAL || id == null) return b
+        if (variant != VARIANT_DESKTOP) return b
         var out = b
             .header("User-Agent", "Qoder")
-            .header("Cosy-Version", id.version)
-            .header("Cosy-ClientType", id.clientType)
+            // 桌面档统一用 CLI 的版本号（与 [QoderMachine] 一致）：实测 1.0.1 / 1.1.69 都能下发，
+            // 真正起作用的是 ClientType=10 + 机器身份，版本号只要不是明显的老古董即可。
+            .header("Cosy-Version", id?.version ?: QoderMachine.COSY_VERSION)
+            .header("Cosy-ClientType", id?.clientType ?: QoderMachine.CLIENT_TYPE)
+        if (id == null) return out
+        out = out
             .header("Cosy-MachineId", id.machineId)
             .header("Cosy-MachineToken", id.machineToken)
             .header("Cosy-MachineOS", id.machineOS)
@@ -435,15 +457,21 @@ object QoderAuthApi {
         return out
     }
 
-    /** GET 带 Bearer。国内走干净请求（不带 Cosy-Machine*），国际版在有真实指纹时附带。 */
-    private fun getForCampaigns(url: String, bearer: String, mode: String, id: QoderMachine.Identity?): String {
+    /** GET 带 Bearer。普通档走最小头；桌面档补齐官方桌面端的身份头。 */
+    private fun getWithIdentity(
+        url: String,
+        bearer: String,
+        variant: String,
+        id: QoderMachine.Identity?,
+    ): String {
+        val desktop = variant == VARIANT_DESKTOP
         val base = Request.Builder().url(url).get()
             .header("Authorization", "Bearer $bearer")
             .header("Accept", JSON)
-            .header("User-Agent", "traework2api")
-            .header("Cosy-Version", "1.0.1")
-            .header("Cosy-ClientType", "10")
-        val req = applyMachineHeaders(base, mode, id).build()
+            .header("User-Agent", if (desktop) "Qoder" else "traework2api")
+            .header("Cosy-Version", if (desktop) (id?.version ?: QoderMachine.COSY_VERSION) else "1.0.1")
+            .header("Cosy-ClientType", QoderMachine.CLIENT_TYPE)
+        val req = applyMachineHeaders(base, variant, id).build()
         client.newCall(req).execute().use { r ->
             val text = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw java.io.IOException("Qoder ${r.code}: ${text.take(200)}")
@@ -451,17 +479,24 @@ object QoderAuthApi {
         }
     }
 
-    /** POST 带 Bearer + JSON body（claim 用，body 传空对象）。 */
-    private fun postBearer(url: String, bearer: String, body: JSONObject, mode: String, id: QoderMachine.Identity?): String {
+    /** POST 带 Bearer + JSON body（claim 用，body 传空对象）。身份头与列表**必须同一档**。 */
+    private fun postClaimRaw(
+        url: String,
+        bearer: String,
+        body: JSONObject,
+        variant: String,
+        id: QoderMachine.Identity?,
+    ): String {
+        val desktop = variant == VARIANT_DESKTOP
         val base = Request.Builder().url(url)
             .post(body.toString().toRequestBody(JSON.toMediaType()))
             .header("Authorization", "Bearer $bearer")
             .header("Content-Type", JSON)
             .header("Accept", JSON)
-            .header("User-Agent", "traework2api")
-            .header("Cosy-Version", "1.0.1")
-            .header("Cosy-ClientType", "10")
-        val req = applyMachineHeaders(base, mode, id).build()
+            .header("User-Agent", if (desktop) "Qoder" else "traework2api")
+            .header("Cosy-Version", if (desktop) (id?.version ?: QoderMachine.COSY_VERSION) else "1.0.1")
+            .header("Cosy-ClientType", QoderMachine.CLIENT_TYPE)
+        val req = applyMachineHeaders(base, variant, id).build()
         client.newCall(req).execute().use { r ->
             val text = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw java.io.IOException("Qoder ${r.code}: ${text.take(200)}")
@@ -469,16 +504,101 @@ object QoderAuthApi {
         }
     }
 
-    /**
-     * 拉取活动列表（可领的在里面）。解析见 [parseCampaigns]。
-     * 国际/国内同走干净请求（不带 Cosy-Machine* 头）：伪指纹会让服务端静默隐藏「每天领」活动，
-     * 无指纹则通用活动保持可见；「每天领 100 Credits」这类仅原生桌面端身份下发的活动会正常缺席。
-     */
-    private fun fetchCampaigns(jt: String, mode: String, id: QoderMachine.Identity?): List<QCampaign> {
-        val url = openApiBase(mode) + EP_CAMPAIGNS + "?forceRefresh=true"
-        val text = getForCampaigns(url, jt, mode, id)
-        return parseCampaigns(JSONObject(text))
+    /** 桌面档的身份材料：优先用抓包回填的真指纹，否则用本机派生（与官方无 umid 客户端同构）。 */
+    private fun campaignIdentity(
+        context: Context,
+        cred: QoderAuthStore.QCred,
+        variant: String,
+    ): QoderMachine.Identity? = if (variant != VARIANT_DESKTOP) null
+    else QoderMachine.identity(context, QoderAuthStore.fingerprint(context, cred.uid))
+
+    /** 上次验证可用/上次使用的活动请求档位。 */
+    private fun campaignVariant(context: Context, mode: String): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_VARIANT + mode, null)
+            ?.takeIf { it == VARIANT_DESKTOP || it == VARIANT_MINIMAL }
+            // 国际版历史上一直需要身份；国内版先用最小头（本地对照里它就能下发）
+            ?: if (mode == MODE_GLOBAL) VARIANT_DESKTOP else VARIANT_MINIMAL
+
+    private fun rememberVariant(context: Context, mode: String, variant: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_VARIANT + mode, variant).apply()
     }
+
+    /**
+     * 活动列表一次请求的完整结果：列表 + 服务端给的 `showCampaign`（null = 没这个字段）。
+     *
+     * ⚠️ `showCampaign=false` **不能**当"确实没活动"：按 qoder2api-hub 的对照，
+     * 缺桌面身份头时服务端就是回 `showCampaign=false, campaigns=[]` 来静默隐藏活动。
+     * 只有用桌面档（全量身份）问出来的空才是真空 —— 见 [loadCampaigns]。
+     */
+    internal data class CampaignList(val campaigns: List<QCampaign>, val showCampaign: Boolean?)
+
+    private fun fetchCampaigns(
+        jt: String,
+        mode: String,
+        variant: String,
+        id: QoderMachine.Identity?,
+    ): CampaignList {
+        val url = openApiBase(mode) + EP_CAMPAIGNS + "?forceRefresh=true"
+        return parseCampaigns(JSONObject(getWithIdentity(url, jt, variant, id)))
+    }
+
+    /**
+     * 拉活动列表，并在"空列表"时**升级身份档位**再问一次。
+     *
+     * 空列表是静默失败（HTTP 200、无错误），所以普通档空了不能就此判定"今天没活动"，
+     * 必须换桌面档（`UA: Qoder` + `Cosy-Machine*`）复核；桌面档已经是最全身份，它空才算空。
+     * 哪一档真的出活动就记住哪一档（按国内/国际分别记），下次不再白白多打一次上游。
+     *
+     * @param jt        起始 jobToken
+     * @param refreshJt 撞到 401 时续 token；返回 null 表示续不动（按失败处理）
+     */
+    private fun loadCampaigns(
+        context: Context,
+        cred: QoderAuthStore.QCred,
+        jt: String,
+        refreshJt: () -> String?,
+    ): CampaignLoad {
+        val first = campaignVariant(context, cred.mode)
+        // 记住的就是桌面档，就别再拿普通档白跑一趟。
+        val ladder = if (first == VARIANT_DESKTOP) listOf(VARIANT_DESKTOP)
+        else listOf(VARIANT_MINIMAL, VARIANT_DESKTOP)
+        var cur = jt
+        var retried401 = false
+        var lastError: String? = null
+        var i = 0
+        while (i < ladder.size) {
+            val v = ladder[i]
+            try {
+                val got = fetchCampaigns(cur, cred.mode, v, campaignIdentity(context, cred, v))
+                lastError = null
+                if (got.campaigns.isNotEmpty()) {
+                    if (v != first) rememberVariant(context, cred.mode, v)
+                    return CampaignLoad(got, v, null)
+                }
+                if (i == ladder.lastIndex) return CampaignLoad(got, v, null)
+            } catch (e: Exception) {
+                val msg = e.message ?: e.javaClass.simpleName
+                lastError = msg
+                if (msg.contains("401") && !retried401) {
+                    retried401 = true
+                    refreshJt()?.let { cur = it }
+                    continue   // 同一档用新 token 再来一次
+                }
+                Log.w(TAG, "campaigns($v) 失败: $msg")
+                if (i == ladder.lastIndex) return CampaignLoad(null, v, msg)
+            }
+            i++
+        }
+        return CampaignLoad(null, first, lastError ?: "未知错误")
+    }
+
+    private data class CampaignLoad(
+        val list: CampaignList?,
+        val variant: String,
+        val error: String?,
+    )
 
     /**
      * 诊断：把领取链路**每一步的原始结果**拼成可复制的文本。
@@ -500,49 +620,77 @@ object QoderAuthApi {
             val jt = runCatching { validJobTokenFor(ctx, cred, 60_000L) }.getOrNull()
             if (jt.isNullOrBlank()) { sb.append("jobToken 失败（PAT 无效或网络不通）\n"); continue }
             sb.append("jobToken ok ").append(jt.take(12)).append("…\n")
-            val id = if (cred.mode == MODE_GLOBAL) {
-                runCatching { QoderMachine.identity(ctx, QoderAuthStore.fingerprint(ctx, m.uid)) }.getOrNull()
-            } else null
-            val raw = try {
-                getForCampaigns(openApiBase(cred.mode) + EP_CAMPAIGNS + "?forceRefresh=true", jt, cred.mode, id)
-            } catch (e: Exception) {
-                sb.append("campaigns 请求失败：").append(e.javaClass.simpleName)
-                    .append(": ").append(e.message).append('\n')
-                continue
+            sb.append("记忆档位：").append(campaignVariant(ctx, cred.mode)).append('\n')
+            // 两档都打一遍：只有这样才分得清"上游真没活动"和"被静默隐藏了"。
+            for (v in listOf(VARIANT_MINIMAL, VARIANT_DESKTOP)) {
+                try {
+                    val id = campaignIdentity(ctx, cred, v)
+                    val raw = getWithIdentity(
+                        openApiBase(cred.mode) + EP_CAMPAIGNS + "?forceRefresh=true", jt, v, id,
+                    )
+                    val parsed = parseCampaigns(JSONObject(raw))
+                    sb.append('[').append(v).append("] 解析 ").append(parsed.campaigns.size)
+                        .append(" 条，可领 ").append(parsed.campaigns.count { it.claimable })
+                        .append(" 条，showCampaign=").append(parsed.showCampaign).append('\n')
+                    for (c in parsed.campaigns) {
+                        sb.append("  · ").append(c.id.take(8)).append(' ').append(c.actionType)
+                            .append(' ').append(c.claimStatus)
+                            .append(" benefit=").append(c.benefitKind).append('/').append(c.benefitAmount)
+                            .append(if (c.claimable) "  ← 可领" else "").append('\n')
+                    }
+                    for (c in parsed.campaigns.filter { it.claimable }) {
+                        val r = runCatching { claimOne(jt, cred.mode, c.id, v, id) }
+                        sb.append("  claim ").append(c.id.take(8)).append(" → ")
+                            .append(r.fold(
+                                { "新领=${it.first} 额度=${it.second}" },
+                                { "异常 ${it.javaClass.simpleName}: ${it.message}" },
+                            ))
+                            .append('\n')
+                    }
+                    if (parsed.campaigns.isEmpty()) {
+                        sb.append("  原文：").append(raw.take(400)).append('\n')
+                    }
+                } catch (e: Exception) {
+                    sb.append('[').append(v).append("] 请求失败：").append(e.javaClass.simpleName)
+                        .append(": ").append(e.message).append('\n')
+                }
             }
-            val camps = runCatching { parseCampaigns(JSONObject(raw)) }.getOrElse { emptyList() }
-            sb.append("解析 ").append(camps.size).append(" 条，可领 ")
-                .append(camps.count { it.claimable }).append(" 条\n")
-            for (c in camps) {
-                sb.append("  · ").append(c.id.take(8)).append(' ').append(c.actionType)
-                    .append(' ').append(c.claimStatus)
-                    .append(" benefit=").append(c.benefitKind).append('/').append(c.benefitAmount)
-                    .append(if (c.claimable) "  ← 可领" else "").append('\n')
-            }
-            for (c in camps.filter { it.claimable }) {
-                val r = runCatching { claimOne(jt, cred.mode, c.id, id) }
-                sb.append("  claim ").append(c.id.take(8)).append(" → ")
-                    .append(r.fold({ "新领=${it.first} 额度=${it.second}" }, { "异常 ${it.javaClass.simpleName}: ${it.message}" }))
-                    .append('\n')
-            }
-            sb.append("campaigns 原文：\n").append(raw.take(1000)).append('\n')
         }
         return sb.toString()
     }
 
-    /** 领一条活动。body 固定 {}（幂等）。返回本次入账额度（replayed 时为 0）。 */
-    private fun claimOne(jt: String, mode: String, campaignId: String, id: QoderMachine.Identity?): Pair<Boolean, Long> {
+    /** 领一条活动。body 固定 {}（幂等）。身份头与列表**必须是同一档**。返回 (是否新领, 入账额度)。 */
+    private fun claimOne(
+        jt: String,
+        mode: String,
+        campaignId: String,
+        variant: String,
+        id: QoderMachine.Identity?,
+    ): Pair<Boolean, Long> {
         val url = openApiBase(mode) + EP_CAMPAIGNS + "/" + campaignId + "/claim"
-        val text = postBearer(url, jt, JSONObject(), mode, id)
-        return parseClaim(JSONObject(text))
+        return parseClaim(JSONObject(postClaimRaw(url, jt, JSONObject(), variant, id)))
     }
 
-    /** 抽出来单独成函数是为了能自检（list/claim 都要打网络）。 */
-    internal fun parseCampaigns(root: JSONObject): List<QCampaign> {
-        val arr = root.optJSONArray("campaigns") ?: return emptyList()
-        return (0 until arr.length()).mapNotNull { i ->
+    /**
+     * 解析活动列表。响应可能把内容裹在 `data` 下，也可能直接放根上（两种都见过）；
+     * 活动 id 的键名也不统一：`campaignId` / `campaignKey` / `id`。
+     *
+     * 抽出来单独成函数是为了能自检（list/claim 都要打网络）。
+     */
+    internal fun parseCampaigns(rootIn: JSONObject): CampaignList {
+        var root = rootIn
+        if (!root.has("campaigns")) root.optJSONObject("data")?.let { root = it }
+        val show = when {
+            root.has("showCampaign") -> root.optBoolean("showCampaign", false)
+            rootIn.has("showCampaign") -> rootIn.optBoolean("showCampaign", false)
+            else -> null
+        }
+        val arr = root.optJSONArray("campaigns") ?: return CampaignList(emptyList(), show)
+        val camps = (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
-            val id = o.optString("campaignId", o.optString("id", ""))
+            val id = o.optString("campaignId", "")
+                .ifBlank { o.optString("campaignKey", "") }
+                .ifBlank { o.optString("id", "") }
             if (id.isBlank()) return@mapNotNull null
             val b = o.optJSONObject("benefit")
             QCampaign(
@@ -553,6 +701,7 @@ object QoderAuthApi {
                 benefitAmount = b?.optLong("amount", 0L) ?: 0L,
             )
         }
+        return CampaignList(camps, show)
     }
 
     /** claim 响应：返回 (是否真的新领到, 本次入账额度)。replayed=true 表示今天已领过，不算新领。 */
@@ -585,52 +734,28 @@ object QoderAuthApi {
      */
     fun claimedTodayFor(context: Context, cred: QoderAuthStore.QCred): Boolean? {
         val jt = validJobTokenFor(context, cred, skewMillis = 60_000L) ?: return null
-        val identity = if (cred.mode == MODE_GLOBAL) {
-            QoderMachine.identity(context, QoderAuthStore.fingerprint(context, cred.uid))
-        } else null
-        val campaigns = runCatching { fetchCampaigns(jt, cred.mode, identity) }.getOrNull() ?: return null
+        val load = loadCampaigns(context, cred, jt) { forceRefreshJobToken(context, cred) }
+        val campaigns = load.list?.campaigns ?: return null
         if (campaigns.isEmpty()) return null
         if (campaigns.any { it.claimable }) return false
         return if (campaigns.any { it.claimStatus.equals("CLAIMED", ignoreCase = true) }) true else null
     }
 
     private fun claimDailyForCred(context: Context, cred: QoderAuthStore.QCred): QClaimResult {
-        // 国际/国内同走干净链路（不带 Cosy-Machine* 头）。桌面端专属「每天领 100 Credits」
-        // 活动在没有原生指纹时服务端会正常缺席，但其它通用活动仍可领；无需再对国际版硬挡 unsupported。
         val jtOrNull = validJobTokenFor(context, cred, skewMillis = 60_000L)
         if (jtOrNull.isNullOrBlank()) return QClaimResult("fail", 0, "没有有效 token，请重新粘贴 PAT 登录")
         // 可变的非空副本：401 时要能就地换掉（Kotlin 对 var 的智能转换不成立，故先落地成 String）
         var jt: String = jtOrNull
-        // 国际版：带机器身份（有抓包真货用真货，否则用官方无-umid 的等价身份）。
-        // 国内版刻意不带 —— 对照实验里国内带指纹反而 no_campaign。
-        val identity = if (cred.mode == MODE_GLOBAL) {
-            QoderMachine.identity(context, QoderAuthStore.fingerprint(context, cred.uid))
-        } else null
 
-        // 活动列表**是动态的**（实测：凌晨查没有「每天领 100 Credits」，过几小时才出现），
-        // 所以一次拉空不等于今天没得领 —— 同一轮里重试几次，别让用户白等一天。
-        // 顺带自愈 401：jobToken 被判废就地续一次再试。
-        var campaigns: List<QCampaign> = emptyList()
-        var lastError: String? = null
-        for (attempt in 1..3) {
-            try {
-                campaigns = fetchCampaigns(jt, cred.mode, identity)
-                lastError = null
-                if (campaigns.any { it.claimable }) break
-            } catch (e: Exception) {
-                val msg = e.message ?: e.javaClass.simpleName
-                lastError = msg
-                if (msg.contains("401")) {
-                    jt = forceRefreshJobToken(context, cred) ?: jt
-                }
-            }
-            if (attempt < 3) {
-                try { Thread.sleep(2_000L) } catch (_: InterruptedException) { break }
-            }
+        // 档位阶梯（普通头 → 桌面身份）：空列表是被静默隐藏时唯一能自救的办法。
+        // 以前这里还叠了 3 轮 × 2 秒的 sleep 硬等"活动刷新"，批量领号时等于空转十几秒；
+        // 活动列表的动态性交给调用方的定时任务（[QoderCheckin]）重试，这里只做一次快速升级。
+        val load = loadCampaigns(context, cred, jt) {
+            forceRefreshJobToken(context, cred)?.also { jt = it }
         }
-        if (campaigns.isEmpty() && lastError != null) {
-            return QClaimResult("fail", 0, "拉取活动失败：$lastError")
-        }
+        val list = load.list
+            ?: return QClaimResult("fail", 0, "拉取活动失败：${load.error ?: "未知错误"}")
+        val campaigns = list.campaigns
         val claimable = campaigns.filter { it.claimable }
         if (claimable.isEmpty()) {
             // 实测（2026-10-25）：活动列表随日期滚动，「每天领 100 Credits」是
@@ -647,17 +772,17 @@ object QoderAuthApi {
                 creditCampaigns == 0 && campaigns.isNotEmpty() ->
                     "无积分活动（${campaigns.size} 条均为查看类，不发 Credits）"
                 campaigns.isNotEmpty() -> "无待领活动（${campaigns.size} 条均已处理）"
-                cred.mode == MODE_GLOBAL -> "无可见活动"
-                else -> "今日无可领活动"
+                else -> "今日无可领活动（上游返回空列表）"
             }
             return QClaimResult("already", 0, why)
         }
+        val identity = campaignIdentity(context, cred, load.variant)
         var total = 0L
         var fresh = 0
         var lastErr: String? = null
         for (c in claimable) {
             try {
-                val (newly, amt) = claimOne(jt, cred.mode, c.id, identity)
+                val (newly, amt) = claimOne(jt, cred.mode, c.id, load.variant, identity)
                 if (newly) { total += amt; fresh++ }
             } catch (e: Exception) {
                 lastErr = e.message ?: e.javaClass.simpleName
@@ -706,17 +831,28 @@ object QoderAuthApi {
 
         // 活动解析：只要 CLAIMABLE 就算可领（判严了会漏领 —— 桌面端 VIEW_DETAILS 也能领）。
         // 注意 parseCampaigns 会**丢弃空 id** 的条目，故 4 条输入 → 3 条有效解析（顺序：act-1, act-2, act-4）。
-        val camps = parseCampaigns(JSONObject("""{"campaigns":[
+        val parsed = parseCampaigns(JSONObject("""{"showCampaign":true,"campaigns":[
             {"campaignId":"act-1","claimStatus":"CLAIMABLE","actionType":"CLAIM_BENEFIT","benefit":{"kind":"CREDITS","amount":100}},
             {"id":"act-2","claimStatus":"CLAIMED","actionType":"CLAIM_BENEFIT","benefit":{"kind":"CREDITS","amount":100}},
             {"campaignId":"","claimStatus":"CLAIMABLE","actionType":"CLAIM_BENEFIT"},
             {"campaignId":"act-4","claimStatus":"CLAIMABLE","actionType":"OTHER"}
         ]}"""))
+        val camps = parsed.campaigns
+        check(parsed.showCampaign == true) { "自检失败：showCampaign 应原样带出（区分『真空』与『被隐藏』）" }
         check(camps.size == 3) { "自检失败：空 id 应被丢弃，4 条输入应解析出 3 条" }
         check(camps[0].id == "act-1" && camps[0].claimable) { "自检失败：CLAIMABLE+CLAIM_BENEFIT 应判可领" }
         check(camps[1].id == "act-2" && !camps[1].claimable) { "自检失败：已领(CLAIMED)不应判可领" }
         check(camps[2].id == "act-4" && camps[2].claimable) { "自检失败：CLAIMABLE 的非 CLAIM_BENEFIT 也该领" }
         check(camps[0].grantsCredits) { "自检失败：带 benefit 的应记额度" }
+
+        // 响应裹在 data 下、id 叫 campaignKey、没有 showCampaign —— 三种兼容都要在。
+        val wrapped = parseCampaigns(JSONObject(
+            """{"data":{"campaigns":[{"campaignKey":"k-1","claimStatus":"CLAIMABLE"}]}}"""
+        ))
+        check(wrapped.campaigns.singleOrNull()?.id == "k-1") {
+            "自检失败：data 包裹 + campaignKey 应能解析出活动"
+        }
+        check(wrapped.showCampaign == null) { "自检失败：缺 showCampaign 应为 null（不是 false）" }
 
         // claim 解析：replayed=true（今天已领过）不算新领、不计额度，避免重复计数。
         check(parseClaim(JSONObject("""{"status":"CLAIMED","replayed":false,"benefit":{"kind":"CREDITS","amount":100}}""")) == (true to 100L)) {
