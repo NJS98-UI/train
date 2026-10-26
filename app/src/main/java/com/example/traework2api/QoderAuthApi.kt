@@ -39,17 +39,18 @@ object QoderAuthApi {
     private const val EP_CAMPAIGNS = "/sash/api/v1/me/campaigns"
 
     /**
-     * 活动列表的请求身份档位。**这是「领取不了」的关键开关**。
+     * 活动列表的请求身份档位。
      *
-     * 两组互相矛盾的现场证据，所以做成**运行时升降级**而不是二选一写死：
-     *  - 2026-10-24 本机对照：同一 jobToken，`ClientType=10` + 普通头 → 活动正常下发；
-     *  - 2026-09-30 qoder2api-hub 用官方桌面端 `main.log` 对照：**缺桌面端身份头时服务端
-     *    不报错、直接返回空活动列表**（`showCampaign=false, campaigns=[]`），
-     *    带齐 `User-Agent: Qoder` + `Cosy-ClientType: 10` + `Cosy-Machine*` 才下发。
+     * 三条现场证据，按可信度排序：
+     *  - 0.7.1 单变量对照（同一 jobToken，只改头）：`Cosy-ClientType: 10` **不发**任何
+     *    `Cosy-Machine*` → `showCampaign=true`、2 条活动；写成 5 就变 `false`/0 条。
+     *    **真正的开关是 ClientType=10，机器身份不是开门钥匙。**
+     *  - 0.7.33 线上诊断（两个国际版账号各打两档）：minimal 与 desktop 返回**逐条相同**。
+     *  - qoder2api-hub（2026-09-30，官方桌面端 main.log 对照）：缺桌面头时服务端可能
+     *    静默返回空列表（HTTP 200 + `campaigns: []`）。
      *
-     * 空列表是**静默失败**（HTTP 200），所以只能先按普通身份问一次，拿到空列表且
-     * `showCampaign` 不为 true 时再升到桌面端身份问一次；哪一档真的出活动就记住哪一档
-     * （按国内/国际分别记），下次直接用，不再白白多打一次上游。
+     * 所以默认走普通档（已验证够用、少发头少一个风控点），只在**拿到空列表**时升到桌面档
+     * 复核一次；哪一档真的出活动就记住哪一档（见 [loadCampaigns]）。
      */
     private const val VARIANT_MINIMAL = "minimal"
     private const val VARIANT_DESKTOP = "desktop"
@@ -512,13 +513,19 @@ object QoderAuthApi {
     ): QoderMachine.Identity? = if (variant != VARIANT_DESKTOP) null
     else QoderMachine.identity(context, QoderAuthStore.fingerprint(context, cred.uid))
 
-    /** 上次验证可用/上次使用的活动请求档位。 */
+    /**
+     * 上次验证可用/上次使用的活动请求档位。
+     *
+     * 默认**普通档**（国内外一致）：0.7.1 的单变量对照 + 0.7.33 的线上诊断都证明
+     * 「`Cosy-ClientType: 10` + 不发任何 `Cosy-Machine*`」就能拿到完整活动列表
+     * （`showCampaign=true`，条数与桌面档逐条相同）。少发机器头 = 少一个可能被风控的点，
+     * 真遇到静默空列表时 [loadCampaigns] 会自动升到桌面档复核。
+     */
     private fun campaignVariant(context: Context, mode: String): String =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_VARIANT + mode, null)
             ?.takeIf { it == VARIANT_DESKTOP || it == VARIANT_MINIMAL }
-            // 国际版历史上一直需要身份；国内版先用最小头（本地对照里它就能下发）
-            ?: if (mode == MODE_GLOBAL) VARIANT_DESKTOP else VARIANT_MINIMAL
+            ?: VARIANT_MINIMAL
 
     private fun rememberVariant(context: Context, mode: String, variant: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
