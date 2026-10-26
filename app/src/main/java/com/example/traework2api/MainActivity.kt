@@ -140,7 +140,8 @@ class MainActivity : Activity() {
     private var showKeepAlive = false
     /** 是否正停在外观风格二级页（与保活设置共用同一套二级页机制）。 */
     private var showStyle = false
-    private val apiKey: String by lazy { Gateway.apiKey(this) }
+    /** 本地 API Key：每次现读（应用内可改），显示与复制永远拿到当下值。 */
+    private val apiKey: String get() = Gateway.apiKey(this)
     /** 账号页积分/额度缓存（null=未拉到），展示用，不存凭据。 */
     private var accountBalance: Long? = null   // 当前可用积分（= total_amount − consumed_amount）
     private var accountCheckin: TraeUpstream.CheckinStatus? = null   // 签到状态（含 enable）

@@ -1,6 +1,11 @@
 package com.example.traework2api
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.media.MediaDrm
+import android.os.Build
+import android.provider.Settings
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
@@ -36,13 +41,89 @@ object Gateway {
     /** 供 MainActivity 的主动续期复用同一把锁（别再加第二把：轮换只允许一个续期在跑）。 */
     fun <T> locked(block: () -> T): T = synchronized(tokenLock) { block() }
 
-    /** 本地 API Key（与上游 access_token 是两套）。首次访问生成并持久化。 */
+    /**
+     * 本地 API Key（与上游 access_token 是两套）。
+     *
+     * **由「APK 签名证书指纹 + Widevine 设备 ID」派生**，同一台设备 + 同一签名永远算出同一个
+     * key。Widevine ID 在设备出厂预置阶段写进 TEE/RPMB 硬件安全区，随系统走：
+     * 覆盖安装、卸载重装、清除数据、恢复出厂、常规刷机（不动 TEE）都带不走它。
+     * 落库里不存 key（旧版残留的一次性清掉），应用数据被清多少次都自愈。
+     *
+     * 行为矩阵：
+     *   - 覆盖安装 / 卸载重装 / 清除数据 / 恢复出厂 / 常规刷机 → key 不变
+     *   - 换签名重装 → key 变（签名参与派生；签名不同本来就得卸载重装）
+     *   - 罕见边缘：无 Widevine 的设备（部分模拟器）退化用 ANDROID_ID，恢复出厂会变；
+     *     刷机动了 TEE 导致 Widevine 重配 → key 变。这两种情况客户端重填一次即可。
+     */
     fun apiKey(ctx: Context): String {
+        // 一次性清理旧版落库的 key（随机值/自定义覆盖均已废弃）：读到就删，避免残值复活
         val prefs = ctx.getSharedPreferences("traework2api_prefs", Context.MODE_PRIVATE)
-        prefs.getString("local_api_key", null)?.takeIf { it.isNotBlank() }?.let { return it }
-        val key = "sk-" + UUID.randomUUID().toString().replace("-", "")
-        prefs.edit().putString("local_api_key", key).apply()
+        if (prefs.getString("local_api_key", null) != null) {
+            prefs.edit().remove("local_api_key").apply()
+        }
+        return derivedKey(ctx)
+    }
+
+    /**
+     * 派生规则：`sk-` + sha256(签名指纹 | Widevine 设备ID) 的前 32 个 hex 字符（128 bit）。
+     *
+     * 为什么选 Widevine 设备 ID 而非 ANDROID_ID：ANDROID_ID 由系统在恢复出厂时重发；
+     * Widevine ID 是硬件预置身份，跨恢复出厂/刷机稳定。签名指纹参与派生：防止不同签名的包
+     * （包名相同）在同一台设备上共享同一个网关 key。
+     */
+    private fun derivedKey(ctx: Context): String {
+        derivedCache?.let { return it }
+        val deviceId = widevineDeviceIdHex()
+            // 无 Widevine（个别模拟器）才退化 ANDROID_ID：重装/清数据仍稳，恢复出厂会变
+            ?: (Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID) ?: "noaid")
+        val key = "sk-" + QoderMachine.sha256Hex("${signingFingerprint(ctx) ?: "nosig"}|$deviceId").take(32)
+        derivedCache = key
         return key
+    }
+
+    /** 进程内缓存：硬件 ID 在一次运行内不会变，别在每次界面渲染都构造 MediaDrm。 */
+    @Volatile
+    private var derivedCache: String? = null
+
+    /** Widevine DRM 的媒体 UUID：edef8ba9-79d6-4ace-a3c8-27dcd51d21ed（公开标准值，负数 hex 是其补码形式）。 */
+    private val WIDEVINE_UUID = UUID(-0x121074568629b532L, -0x5c37d8232ae2e13L)
+
+    /** Widevine 设备唯一 ID 的 hex；设备无 Widevine 或读失败返回 null（由调用方退化）。 */
+    @Suppress("DEPRECATION")
+    private fun widevineDeviceIdHex(): String? = try {
+        val drm = MediaDrm(WIDEVINE_UUID)
+        try {
+            // "deviceUniqueId"：出厂预置的设备级 ID。常量 PROPERTY_DEVICE_UNIQUE_ID 要 API 28，
+            // 字面量全版本可用（同一个值）。
+            val id = drm.getPropertyByteArray("deviceUniqueId")
+            id?.joinToString("") { b -> String.format("%02x", b.toInt() and 0xFF) }
+        } finally {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) drm.close() else drm.release()
+        }
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** APK 签名证书的 SHA-256 指纹；拿不到（理论边缘）返回 null，派生退化为纯设备 ID。 */
+    @Suppress("DEPRECATION")
+    private fun signingFingerprint(ctx: Context): String? = try {
+        val pm = ctx.packageManager
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pm.getPackageInfo(ctx.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+        } else {
+            pm.getPackageInfo(ctx.packageName, PackageManager.GET_SIGNATURES)
+        }
+        val cert = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray()
+        } else {
+            info.signatures?.firstOrNull()?.toByteArray()
+        }
+        cert?.let {
+            val d = MessageDigest.getInstance("SHA-256").digest(it)
+            d.joinToString("") { b -> String.format("%02x", b.toInt() and 0xFF) }
+        }
+    } catch (_: Throwable) {
+        null
     }
 
     /**
@@ -154,6 +235,8 @@ object Gateway {
     fun selfCheck(ctx: Context) {
         val a = apiKey(ctx)
         check(a.isNotBlank() && a.startsWith("sk-")) { "自检失败：本地 API Key 格式不对" }
+        // 派生 key 是确定性的：两次取值必须一致（钉住"每次取值都变"会让所有客户端 401 的老 bug）
         check(a == apiKey(ctx)) { "自检失败：本地 API Key 不稳定（每次取值都变会让所有客户端 401）" }
+        check(a.length == "sk-".length + 32) { "自检失败：派生 Key 长度不对（应为 sk- + 32 hex）" }
     }
 }
