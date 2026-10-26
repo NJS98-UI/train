@@ -71,8 +71,8 @@ object QoderModelCatalog {
     val BUILTIN: List<QModel> = listOf(
         // ---- key 全部来自官方目录快照（catalog-v6 解密导出），不再靠命名规律猜 ----
         // 首项必须是 DEFAULT_KEY（自检 check(BUILTIN.first().key == DEFAULT_KEY)）
-        QModel("qwen3-coder-plus", "Qwen3 Coder Plus", 180_000, false, 1.0),
-        QModel("auto", "Auto（容易排队）", 180_000, false, 0.5),
+        QModel("qwen3-coder-plus", "Qwen3 Coder Plus", 180_000, false, null),
+        QModel("auto", "Auto", 180_000, false, 0.5),
         QModel("ultimate", "极致", 1_000_000, true, 0.8, aliases = listOf("Ultimate")),
         QModel("performance", "快速", 1_000_000, false, null, aliases = listOf("Performance")),
         QModel("efficient", "经济", 180_000, false, null, aliases = listOf("Efficient")),
@@ -99,27 +99,9 @@ object QoderModelCatalog {
     /** 兼容旧引用名。 */
     val ALL: List<QModel> get() = current()
 
-    /**
-     * 兜底模型：客户端没指定 / 指定了不认识的名字。
-     *
-     * ⚠️ 曾经是 `auto`，实测（2026-10-26）它**默认排队**：
-     * 上游返回 `403 / 10605 / RESOURCE_LIMIT / isQueued:true / retryAfterSeconds:30`。
-     * 客户端不指定模型是很常见的情形（很多客户端只填 base_url），一律撞上排队就成了
-     * "一次都用不了"。改成实测直接可用的 `qwen3-coder-plus`。
-     */
-    const val DEFAULT_KEY = "qwen3-coder-plus"
+    /** 兜底模型：客户端没指定 / 指定了不认识的名字。 */
+    const val DEFAULT_KEY = "auto"
 
-    /**
-     * 实测「不排队」的模型清单（仅供参考，**不用于自动降级**）。
-     *
-     * 2026-10-26 实测：`qwen3-coder-plus` / `claude-sonnet-4` / `deepseek-v3` 可直接用；
-     * `auto` / `ultimate` / `performance` / `efficient` / `gmodel` / `dfmodel` / `qfmodel`
-     * 对**免费额度账号**会永久 `RESOURCE_LIMIT` 排队。
-     *
-     * ⚠️ 用户明确要求**不要自动降级**：换模型会让客户端拿到不是它要的模型的回答。
-     * 排队时只如实报原因 + 支持手动重试。
-     */
-    val QUEUE_FALLBACK_KEYS = listOf("qwen3-coder-plus", "claude-sonnet-4", "deepseek-v3")
 
     /** 1M 上下文的兜底模型（唯一能保证 1M 的那个）。 */
     private const val ONE_M_KEY = "ultimate"

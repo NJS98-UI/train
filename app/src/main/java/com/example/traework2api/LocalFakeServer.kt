@@ -127,6 +127,12 @@ class LocalFakeServer(private val apiKey: String) {
             check(retryableUpstreamError("http:401")) { "自检失败：401 应换号" }
             check(retryableUpstreamError("intl_create:429")) { "自检失败：429 应换号" }
             check(retryableUpstreamError("http:503")) { "自检失败：5xx 应换号" }
+            // 排队要换号（按账号判的），但不该先续期、不该等重试
+            check(retryableUpstreamError("queued:dfmodel")) { "自检失败：排队应允许换号" }
+            check(!authRelatedError("queued:dfmodel")) { "自检失败：排队不该触发续期" }
+            check(!authRelatedError("http:429")) { "自检失败：429 不该触发续期" }
+            check(!authRelatedError("http:503")) { "自检失败：5xx 不该触发续期" }
+            check(authRelatedError("http:401")) { "自检失败：401 应触发续期" }
             check(retryableUpstreamError("intl_events:exception")) { "自检失败：非 http 类错误应保守换号" }
             check(!retryableUpstreamError("http:400")) { "自检失败：400 是请求本身的问题，换谁都一样，不该换号" }
             check(!retryableUpstreamError("intl_commit:404")) { "自检失败：404 不该换号" }
@@ -195,7 +201,26 @@ class LocalFakeServer(private val apiKey: String) {
          * 请求本身的问题（400/404/422 参数错）→ 换谁都一样，换号只会白耗另一个账号的额度并把真错误藏起来。
          * 解析不出状态码的（如网络异常、上游非 http 类错误）→ 保守换一次。
          */
+        /**
+         * 只有**鉴权类**错误才值得"先在同一账号上续期再重试"。
+         *
+         * 其他可重试错误（429 限流、5xx、排队）续期没有任何帮助 ——
+         * 却要付一次 ExchangeToken 往返（还可能轮换 refreshToken），
+         * 用户感受到的就是"每次失败都要多等一两秒"。
+         */
+        internal fun authRelatedError(err: String): Boolean {
+            if (err.startsWith("queued:")) return false
+            val code = err.substringAfterLast(':').trim().toIntOrNull() ?: return false
+            return code == 401 || code == 403
+        }
+
         internal fun retryableUpstreamError(err: String): Boolean {
+            // 排队/资源受限（Qoder 403 + RESOURCE_LIMIT）**要换号**：
+            // 实测排队是**按账号**判的（同一模型 A 排队、B 正常），所以换号是真有效的手段。
+            // 注意：这里只决定"该不该换号"，**不含等待重试** ——
+            // QoderUpstream 遇到排队会立即返回（不 sleep），所以换号是秒级的，
+            // 不会像以前那样先白等 30 秒 × 3 次（那是"转发变慢"的主因）。
+            if (err.startsWith("queued:")) return true
             val code = err.substringAfterLast(':').trim().toIntOrNull() ?: return true
             return code == 401 || code == 403 || code == 429 || code >= 500
         }
@@ -636,7 +661,7 @@ class LocalFakeServer(private val apiKey: String) {
 
             // 先在同一账号上强制续期重试：token 未到期却被判废时，换号是浪费
             // （换号会真的切走并持久化，用户下次对话就换了账号）。
-            val refreshed = if (!streaming && err != null && !didRefresh && retryableUpstreamError(err!!)) {
+            val refreshed = if (!streaming && err != null && !didRefresh && authRelatedError(err!!)) {
                 try { refreshSameAccount?.invoke(err!!) ?: false } catch (e: Exception) {
                     android.util.Log.w(TAG, "同账号续期失败: ${e.javaClass.simpleName}: ${e.message}")
                     false

@@ -359,31 +359,29 @@ object QoderUpstream {
                 }
             }
 
-            // ⚠️ 排队/资源受限（RESOURCE_LIMIT）**不做自动降级**（用户 2026-10-26 明确要求）：
-            // 换模型会让用户拿到"不是他要的那个模型"的回答，属于自作主张。
-            // 实测差异：有的账号（如免费额度号）对免费模型**永久**排队，换模型只是绕开症状。
-            // 所以这里只做两件事：短暂重试 + 把**真实原因**说清楚。
+            // ⚠️ 排队/资源受限（RESOURCE_LIMIT）**立即报错，不重试、不降级、不换号**：
+            //  · 不降级：换模型会让客户端拿到不是它要的模型的回答（用户明确要求）；
+            //  · 不重试：上游给的 retryAfterSeconds 是 30 秒，3 次重试 = 白等 1 分半，
+            //    这正是"转发变慢"的主因（以前一次对话光排队就耗掉 90 秒）；
+            //  · 不换号：排队是账号级的，换到别的号一样排队，只会更慢。
             val queued = queueWaitMs(raw)
-            val retryable = code == 408 || code == 429 || code >= 500 ||
-                (queued != null && code != 403)   // 403 是判定结果，重试没有意义
+            if (queued != null) {
+                val secs = (queued / 1000L).coerceAtLeast(1L)
+                android.util.Log.w(TAG, "上游排队 model=$modelKey retryAfter=${secs}s: ${raw.take(200)}")
+                emitError(out, "模型「$modelKey」当前不可用（上游资源受限，${secs} 秒后可重试）。" +
+                    "请换其它模型，或在账号页切换 Qoder 账号。")
+                out("data: [DONE]\n\n")
+                settle(null, "queued:$modelKey")
+                return
+            }
+
+            val retryable = code == 408 || code == 429 || code >= 500
             if (retryable && attempt < MAX_ATTEMPTS) {
-                val wait = (queued ?: retryAfterMs(retryAfter) ?: ((1L shl (attempt - 1)) * 1000L))
+                val wait = (retryAfterMs(retryAfter) ?: ((1L shl (attempt - 1)) * 1000L))
                     .coerceAtMost(MAX_RETRY_WAIT_MS)
                 android.util.Log.i(TAG, "上游 $code (attempt $attempt/$MAX_ATTEMPTS)，${wait}ms 后重试")
                 sleepQuietly(wait)
                 continue
-            }
-
-            if (queued != null) {
-                // 如实报：哪个模型、排多久、当前账号什么情况。不说"网络错误"这种含糊话。
-                val secs = (queued / 1000L).coerceAtLeast(1L)
-                val msg = "上游资源紧张：模型「$modelKey」正在排队（约 ${secs} 秒），" +
-                    "当前账号未被允许进入队列。可换其它模型，或在账号页切换到别的 Qoder 账号。"
-                android.util.Log.w(TAG, "上游排队最终失败 model=$modelKey: ${raw.take(200)}")
-                emitError(out, msg)
-                out("data: [DONE]\n\n")
-                settle(null, "queued:$modelKey")
-                return
             }
 
             android.util.Log.w(TAG, "上游最终失败 $code: ${raw.take(200)}")
