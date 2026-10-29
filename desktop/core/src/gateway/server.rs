@@ -359,7 +359,7 @@ async fn forward_trae(app: &Arc<AppState>, src: Value, wants_stream: bool, cred:
         let app = app.clone();
         let prepared = prepared.clone();
         let cur = cur.clone();
-        Box::new(move |emit: EmitBox| {
+        Box::new(move |mut emit: EmitBox| {
             let app = app.clone();
             let prepared = prepared.clone();
             let cur = cur.clone();
@@ -480,7 +480,7 @@ async fn forward_qoder(app: &Arc<AppState>, src: Value, wants_stream: bool, cred
         let app = app.clone();
         let src = src.clone();
         let cur = cur.clone();
-        Box::new(move |emit: EmitBox| {
+        Box::new(move |mut emit: EmitBox| {
             let app = app.clone();
             let src = src.clone();
             let cur = cur.clone();
@@ -751,26 +751,6 @@ async fn run_loop(
             }
             log_i!(TAG, "换号后重试（原错误: {}）", err.as_deref().unwrap_or(""));
             attempt += 1;
-        }
-    };
-
-    if spawned {
-        let _rx = rx; // 交给响应体
-        let rx = _rx.unwrap();
-        tokio::spawn(drive);
-        // 流式响应头：CORS 头由全局 add_cors 统一补，这里只给 event-stream 必需的两个。
-        Response::builder()
-            .status(200)
-            .header(header::CONTENT_TYPE, "text/event-stream")
-            .header(header::CACHE_CONTROL, "no-cache")
-            .body(Body::from_stream(sse_stream(rx)))
-            .unwrap_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
-    } else {
-        drop(tx);
-        match drive.await {
-            FinalBody::Streamed => unreachable!(),
-            FinalBody::Json(v) => json_response(200, v),
-            FinalBody::Err(msg) => json_response(502, openai_error("upstream_error", &msg)),
         }
     }
 }
