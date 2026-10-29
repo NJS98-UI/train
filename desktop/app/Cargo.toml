@@ -1,0 +1,19 @@
+[package]
+name = "traework2api-app"
+version = "0.4.17"
+edition = "2021"
+
+[lib]
+name = "traework2api_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+traework2api-core = { path = "../core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TraeWork2API</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-style="indigo" data-mode="light">
+  <div id="app">
+    <!-- 顶栏：二级页才出现的「← 返回」+ 标题 + 副标题 + 1dp 分隔线 -->
+    <header class="topbar">
+      <div class="topbar-inner">
+        <button id="backAction" class="link-pill hidden" type="button">← 返回</button>
+        <h1 id="pageTitle">概览</h1>
+        <p id="pageSubtitle">本地服务运行状态</p>
+      </div>
+    </header>
+    <div class="divider"></div>
+
+    <!-- 内容区 -->
+    <main id="content" class="content"></main>
+
+    <div class="divider"></div>
+    <!-- 底部导航（4 Tab，对齐 MainActivity Page.entries） -->
+    <nav id="navBar" class="navbar">
+      <button class="nav-item" data-page="overview" type="button">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M3 3h8v8H3V3zm10 0h8v5h-8V3zM3 13h8v8H3v-8zm10 3h8v5h-8v-5zm0-8h8v10h-8V8z"/></svg>
+        <span>概览</span>
+      </button>
+      <button class="nav-item" data-page="account" type="button">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zm0 2c-4 0-8 2-8 4.5V21h16v-2.5C20 16 16 14 12 14z"/></svg>
+        <span>账号</span>
+      </button>
+      <button class="nav-item" data-page="models" type="button">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 2 3 6.5v11L12 22l9-4.5v-11L12 2zm0 2.3 6.2 3.1L12 10.5 5.8 7.4 12 4.3zM5 9.1l6 3v7.2l-6-3V9.1zm8 10.2v-7.2l6-3v7.2l-6 3z"/></svg>
+        <span>模型</span>
+      </button>
+      <button class="nav-item" data-page="records" type="button">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M13 3a9 9 0 0 0-8.95 8H1l3.9 3.9L8.8 11H6.06A7 7 0 1 1 13 20a6.96 6.96 0 0 1-4.95-2.05l-1.42 1.42A8.95 8.95 0 0 0 13 22a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+        <span>记录</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- 弹窗遮罩 + 面板（confirmDialog / 选择弹窗 共用） -->
+  <div id="modalOverlay" class="modal-overlay hidden">
+    <div id="modalPanel" class="modal-panel" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <!-- Toast（对齐 Android toast()：底部短提示） -->
+  <div id="toastHost" class="toast-host"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
