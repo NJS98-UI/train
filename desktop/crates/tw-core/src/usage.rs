@@ -10,6 +10,7 @@
 //!   桌面 UI 有清空按钮，属 design 新增语义）。
 //! - 解析整体容错：坏数据当空（runCatching 同构），单条字段缺省见 [`from_value`]。
 
+#[cfg(test)]
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -196,6 +197,7 @@ impl UsageStore {
     }
 
     /// 测试辅助：绕过内存缓存从盘重读（等价“换个进程重启”验证落盘）。
+    #[cfg(test)]
     fn reload_from_disk(dir: &Path) -> Vec<UsageRecord> {
         let store = DataStore::new(dir);
         store

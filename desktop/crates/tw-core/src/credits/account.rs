@@ -11,7 +11,9 @@
 use crate::auth::model::{now_ms, TraeAccount};
 use crate::auth::store::{QoderAuthStore, TraeAuthStore};
 use crate::checkin::trae_api;
-use crate::storage::{json_i64, DataStore};
+use crate::storage::DataStore;
+#[cfg(test)]
+use crate::storage::json_i64;
 use crate::upstream::trae::TraeRegion;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

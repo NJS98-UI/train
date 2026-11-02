@@ -13,6 +13,7 @@ struct BuiltinModel {
     key: &'static str,
     name: &'static str,
     context_length: i64,
+    #[allow(dead_code)] // 与 Kotlin QModel 形状对齐，展示层经序列化读取
     reasoning: bool,
     /// `None` = 倍率未知（输出不写 price_factor，展示层显示「倍率未知」）
     price_factor: Option<f64>,
