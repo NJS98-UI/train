@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/tw-core", "crates/tw-bridge", "apps/tw-app"]
+default-members = ["crates/tw-core", "crates/tw-bridge"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tw-core = { path = "crates/tw-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "gzip"] }
+futures-util = "0.3"
+sha2 = "0.10"
+md-5 = "0.10"
+aes = "0.8"
+cbc = "0.1"
+rsa = "0.9"
+rand = "0.8"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+dirs = "5"
+
+[profile.release]
+codegen-units = 1
+lto = true

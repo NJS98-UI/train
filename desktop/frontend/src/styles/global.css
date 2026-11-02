@@ -1,0 +1,213 @@
+/* 全局重置 + 应用骨架（桌面横屏：左 rail 纵向导航 → 右侧 顶栏 → contentHost） */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  background: var(--tw-background);
+  color: var(--tw-on-surface);
+  font-size: var(--fs-body);
+  line-height: 1.12; /* setLineSpacing(0, 1.12f)（§4.3） */
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+.tw-app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--tw-background);
+}
+
+/* ---- 外壳：左导航 + 右内容区（横屏） ---- */
+.tw-shell {
+  display: flex;
+  height: 100%;
+  background: var(--tw-background);
+}
+
+/* ---- 顶栏 ---- */
+.tw-topbar {
+  background: var(--tw-background);
+  padding: var(--bar-pad-top) var(--page-pad-h) var(--bar-pad-bottom);
+}
+
+.tw-topbar__inner {
+  max-width: var(--content-max);
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 二级页返回出口在标题**上方**（验收 §9.1） */
+.tw-topbar__back {
+  align-self: flex-start;
+  color: var(--tw-primary);
+  font-size: var(--fs-caption);
+  font-weight: 700;
+  min-height: 48px;
+  min-width: 48px;
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 14px;
+  border-radius: min(var(--radius-pill), 9999px);
+}
+
+.tw-topbar__title {
+  font-size: var(--fs-title); /* FS_TITLE=22 */
+  font-weight: 500; /* sans-serif-medium */
+  color: var(--tw-on-surface);
+}
+
+.tw-topbar__subtitle {
+  font-size: var(--fs-caption);
+  color: var(--tw-on-surface-variant);
+}
+
+/* ---- 内容宿主（weight=1f） ---- */
+.tw-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- 分隔线：1px outline_variant（§4.3） ---- */
+.tw-divider {
+  height: 1px;
+  min-height: 1px;
+  background: var(--tw-outline-variant);
+  flex: 0 0 auto;
+}
+
+/* ---- 左侧纵向导航：品牌 + 4 页签自上而下 + 底部外观入口 ---- */
+.tw-rail {
+  display: flex;
+  flex-direction: column;
+  width: 196px;
+  flex: 0 0 auto;
+  padding: 14px 12px 18px;
+  background: var(--tw-surface, var(--tw-background));
+  border-right: 1px solid var(--tw-outline-variant);
+}
+
+.tw-rail__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 14px;
+}
+
+.tw-rail__logo {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--tw-primary);
+  background: var(--tw-primary-container);
+  border-radius: 8px;
+  flex: 0 0 auto;
+}
+
+.tw-rail__logo svg {
+  width: 18px;
+  height: 18px;
+}
+
+.tw-rail__name {
+  font-size: var(--fs-body);
+  font-weight: 700;
+  color: var(--tw-on-surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tw-rail__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tw-rail__foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--tw-outline-variant);
+}
+
+.tw-rail__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 14px;
+  border-radius: min(var(--radius-pill), 9999px);
+  color: var(--tw-on-surface-variant);
+  text-align: left;
+}
+
+.tw-rail__item:hover {
+  background: var(--tw-hover, rgba(128, 128, 128, 0.08));
+}
+
+/* 选中：primary + medium + primary_container 胶囊（对齐原底部页签选中态） */
+.tw-rail__item--active {
+  color: var(--tw-primary);
+  background: var(--tw-primary-container);
+  font-weight: 500;
+}
+
+.tw-rail__icon {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.tw-rail__label {
+  font-size: var(--fs-chip);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tw-nav__icon {
+  width: 24px;
+  height: 24px;
+  display: block;
+}

@@ -1,0 +1,558 @@
+/* 原子组件样式（§8.3 Android→CSS 迁移表）：只使用 --tw-* 与形态/字号 token。
+   触控下限 min-height:48px；仅不可点击的状态胶囊允许 32px。 */
+
+/* ---- 文本 ---- */
+.tw-text {
+  display: inline-block;
+  word-break: break-word;
+}
+
+.tw-mono {
+  display: inline-block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  word-break: break-all;
+}
+
+.tw-text.tw-fs-title,
+.tw-mono.tw-fs-title { font-size: var(--fs-title); }
+.tw-text.tw-fs-section,
+.tw-mono.tw-fs-section { font-size: var(--fs-section); }
+.tw-text.tw-fs-card-title,
+.tw-mono.tw-fs-card-title { font-size: var(--fs-card-title); }
+.tw-text.tw-fs-metric,
+.tw-mono.tw-fs-metric { font-size: var(--fs-metric); }
+.tw-text.tw-fs-body,
+.tw-mono.tw-fs-body { font-size: var(--fs-body); }
+.tw-text.tw-fs-value,
+.tw-mono.tw-fs-value { font-size: var(--fs-value); }
+.tw-text.tw-fs-caption,
+.tw-mono.tw-fs-caption { font-size: var(--fs-caption); }
+.tw-text.tw-fs-chip,
+.tw-mono.tw-fs-chip { font-size: var(--fs-chip); }
+
+.tw-bold { font-weight: 700; }
+.tw-medium { font-weight: 500; }
+
+.tw-selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ---- 滚动页 + 内容限宽居中 ---- */
+.tw-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.tw-page {
+  max-width: var(--content-max);
+  margin-inline: auto;
+  padding: var(--page-pad-top) var(--page-pad-h) var(--page-pad-bottom);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- 卡片三形态（§2 约定） ---- */
+.tw-card {
+  padding: var(--card-pad);
+  border-radius: var(--radius-card);
+  margin-top: var(--gap);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tw-card--normal {
+  background: var(--tw-surface);
+  border: 1px solid var(--tw-outline-variant);
+  box-shadow: var(--card-shadow);
+}
+
+.tw-card--soft {
+  background: var(--tw-surface-container);
+}
+
+.tw-card--emphasis {
+  background: var(--tw-primary-container);
+  color: var(--tw-on-primary-container);
+}
+
+/* ---- section 标题 ---- */
+.tw-section {
+  font-size: var(--fs-section);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--tw-on-surface-variant);
+  padding: 18px 0 8px;
+}
+
+/* ---- 行 ---- */
+.tw-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  min-height: 48px;
+}
+
+/* ---- labelValue（标签列 min-width 96px，值左间距 12px） ---- */
+.tw-label-value {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.tw-label-value__label {
+  flex: 0 0 auto;
+  min-width: 96px;
+  font-size: var(--fs-caption);
+  color: var(--tw-on-surface-variant);
+}
+
+.tw-label-value__value {
+  flex: 1 1 auto;
+  font-size: var(--fs-value);
+  color: var(--tw-on-surface);
+}
+
+/* ---- chip / 状态圆点 ---- */
+.tw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding-inline: 12px;
+  border-radius: min(var(--radius-pill), 9999px);
+  font-size: var(--fs-chip);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.tw-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+/* ---- 主按钮 ---- */
+.tw-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 48px;
+  padding-inline: 18px;
+  border-radius: var(--radius-control);
+  font-size: var(--fs-body);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.tw-btn--filled {
+  background: var(--tw-primary);
+  color: var(--tw-on-primary);
+}
+
+.tw-btn--outlined {
+  background: transparent;
+  border: 1px solid var(--tw-outline-variant);
+  color: var(--tw-primary);
+}
+
+/* full = 满宽 48dp（§2 约定） */
+.tw-btn--full {
+  width: 100%;
+  height: 48px;
+  background: var(--tw-primary);
+  color: var(--tw-on-primary);
+}
+
+.tw-btn--danger {
+  background: transparent;
+  border: 1px solid var(--tw-error);
+  color: var(--tw-error);
+}
+
+/* 已签态：success_container 胶囊 + 32px + FS_CHIP */
+.tw-btn--done {
+  min-height: 32px;
+  padding-inline: 14px;
+  border-radius: min(var(--radius-pill), 9999px);
+  font-size: var(--fs-chip);
+  background: var(--tw-success-container);
+  color: var(--tw-success);
+  border: none;
+}
+
+/* 其它态：surface_variant 胶囊 */
+.tw-btn--muted {
+  min-height: 32px;
+  padding-inline: 14px;
+  border-radius: min(var(--radius-pill), 9999px);
+  font-size: var(--fs-chip);
+  background: var(--tw-surface-variant);
+  color: var(--tw-on-surface-variant);
+  border: none;
+}
+
+/* busy/disabled：alpha 0.6 + 禁点（§2.1 第 4 项） */
+.tw-btn--disabled,
+.tw-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* full 按钮上的 muted/disabled 仍保持整行形态（启停 busy 态） */
+.tw-btn--full.tw-btn--muted {
+  min-height: 48px;
+  height: 48px;
+  border-radius: var(--radius-control);
+  font-size: var(--fs-body);
+  background: var(--tw-surface-variant);
+  color: var(--tw-on-surface-variant);
+}
+
+/* ---- linkAction：48×48 下限，13px bold ---- */
+.tw-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  min-width: 48px;
+  padding-inline: 14px;
+  border-radius: min(var(--radius-pill), 9999px);
+  font-size: var(--fs-caption);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* ---- accountBar：整行可点（左标题 / 右 ▾） ---- */
+.tw-accountbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 48px;
+  margin-top: var(--gap);
+  padding: 16px;
+  background: var(--tw-surface);
+  border: 1px solid var(--tw-outline-variant);
+  border-radius: var(--radius-control);
+  text-align: left;
+}
+
+.tw-accountbar__label {
+  font-size: var(--fs-value);
+  font-weight: 700;
+}
+
+.tw-accountbar__caret {
+  font-size: var(--fs-card-title);
+  color: var(--tw-on-surface-variant);
+}
+
+/* ---- searchInput ---- */
+.tw-search {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 14px;
+  background: var(--tw-surface);
+  border: 1px solid var(--tw-outline-variant);
+  border-radius: var(--radius-control);
+  font-size: var(--fs-body);
+}
+
+.tw-search::placeholder {
+  color: var(--tw-on-surface-variant);
+}
+
+/* ---- shareBar：6px 高占比条 ---- */
+.tw-sharebar {
+  height: 6px;
+  margin-top: 6px;
+  border-radius: min(var(--radius-pill), 9999px);
+  background: var(--tw-surface-variant);
+  overflow: hidden;
+}
+
+.tw-sharebar__fill {
+  height: 100%;
+  background: var(--tw-primary);
+}
+
+/* ---- toasts：顶部居中固定层，pointer-events 穿透空白 ---- */
+.tw-toasts {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 2000;
+  pointer-events: none;
+  width: max-content;
+  max-width: min(var(--content-max), calc(100vw - 24px));
+}
+
+.tw-toast {
+  pointer-events: auto;
+  max-width: 100%;
+  padding: 10px 18px;
+  border-radius: min(var(--radius-pill), 9999px);
+  background: color-mix(in srgb, var(--tw-on_surface) 92%, transparent);
+  color: var(--tw-surface);
+  font-size: var(--fs-caption);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  cursor: default;
+}
+
+/* ---- 弹窗壳（§2.7） ---- */
+.tw-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: color-mix(in srgb, var(--tw-on_surface) 32%, transparent);
+}
+
+.tw-dialog {
+  width: min(var(--content-max), 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  padding: var(--card-pad);
+  border-radius: var(--radius-card);
+  background: var(--tw-surface);
+  color: var(--tw-on-surface);
+  box-shadow: var(--card-shadow);
+}
+
+/* title 17bold / message 14 variant / content top 14 / 按钮行 top 18 等宽 */
+.tw-dialog__title {
+  font-size: var(--fs-card-title);
+  font-weight: 700;
+}
+
+.tw-dialog__message {
+  margin-top: 6px;
+  font-size: var(--fs-value);
+  color: var(--tw-on-surface-variant);
+}
+
+.tw-dialog__content {
+  margin-top: 14px;
+}
+
+.tw-dialog__actions {
+  display: flex;
+  gap: var(--gap);
+  margin-top: 18px;
+}
+
+.tw-dialog__actions > .tw-btn {
+  flex: 1 1 0;
+}
+
+/* ---- picker：行高 56px（由内联 style 传入），内部滚动 ---- */
+.tw-picker {
+  overflow-y: auto;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--tw-outline-variant);
+}
+
+.tw-picker__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px; /* PICKER_ROW_H = 56（§4.3） */
+  padding-inline: 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tw-picker__main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tw-picker__primary {
+  font-size: var(--fs-value);
+  font-weight: 700;
+  color: var(--tw-on-surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tw-picker__caption {
+  font-size: var(--fs-caption);
+  color: var(--tw-on-surface-variant);
+}
+
+.tw-picker__check {
+  font-size: var(--fs-card-title);
+  font-weight: 700;
+  color: var(--tw-success);
+  flex: 0 0 auto;
+}
+
+.tw-picker__delete {
+  flex: 0 0 auto;
+  font-size: var(--fs-chip);
+  font-weight: 700;
+  color: var(--tw-error);
+  min-height: 32px;
+  padding-inline: 8px;
+}
+
+/* ---- time picker ---- */
+.tw-timepicker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.tw-timepicker__col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 72px;
+}
+
+.tw-timepicker__arrow {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--tw-primary);
+  font-size: var(--fs-value);
+}
+
+.tw-timepicker__value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-metric);
+  font-weight: 700;
+  color: var(--tw-on-surface);
+  padding: 2px 0;
+}
+
+.tw-timepicker__hint {
+  font-size: var(--fs-chip);
+  color: var(--tw-on-surface-variant);
+}
+
+.tw-timepicker__colon {
+  font-size: var(--fs-metric);
+  font-weight: 700;
+  color: var(--tw-on-surface);
+  align-self: center;
+  padding-bottom: 18px;
+}
+
+/* ---- 诊断：等宽、可选中、内部滚动 ---- */
+.tw-diagnose {
+  margin: 0;
+  max-height: 50vh;
+  overflow: auto;
+  padding: 12px;
+  border-radius: var(--radius-control);
+  background: var(--tw-surface-container);
+  color: var(--tw-on-surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* Android 侧 10sp 低于 FS 下限，桌面按 §4.3 最小字号 FS_CHIP 呈现 */
+  font-size: var(--fs-chip);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ---- 外观页：风格行 / 色样 / 亮暗行 / 单选圆点 ---- */
+.tw-styleopt {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 56px;
+  margin-top: var(--gap);
+  padding: var(--card-pad);
+  text-align: left;
+  background: var(--tw-surface);
+  border: 1px solid var(--tw-outline-variant);
+  border-radius: var(--radius-card);
+  box-shadow: var(--card-shadow);
+}
+
+/* 选中：primary 2dp 描边 + elevation+1（§2.6） */
+.tw-styleopt--selected {
+  border: 2px solid var(--tw-primary);
+}
+
+.tw-swatch {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--tw-outline-variant);
+  border-radius: min(var(--radius-card), 24px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tw-swatch__pill {
+  width: 24px;
+  height: 7px;
+  border-radius: min(var(--radius-control), 8px);
+}
+
+/* 卡片内的纵向分组（体检项 / 汇总组 / 亮暗行），与卡片 gap 一起构成行距 */
+.tw-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 亮暗模式行（minHeight 52dp） */
+.tw-modeopt {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 52px;
+  text-align: left;
+}
+
+.tw-radio {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--tw-surface);
+  border: 1px solid var(--tw-outline);
+}
+
+/* 选中：容器实心 + primary 底，中心 8px on_primary 点 */
+.tw-radio--on {
+  border: none;
+}
+
+.tw-radio__inner {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}

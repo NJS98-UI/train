@@ -1,0 +1,51 @@
+/* :root 兜底变量 = indigo light（§4.2 ① 首套为默认）。
+   运行期由 App 根节点按 {styleId, mode} 注入覆盖（19 键 → --tw-*，形态 token + FS token）。
+   色值逐格抄自 .monkeycode/analysis/ui-keepalive.md §4.2（indigo light 列）。 */
+:root {
+  --tw-primary: #4f46e5;
+  --tw-primary-container: #e6e7ff;
+  --tw-on-primary: #ffffff;
+  --tw-on-primary-container: #17115b;
+  --tw-secondary: #2563a9;
+  --tw-background: #f7f7fc;
+  --tw-surface: #ffffff;
+  --tw-surface-container: #f0f0f8;
+  --tw-surface-variant: #e7e7f0;
+  --tw-on-surface: #1b1b22;
+  --tw-on-surface-variant: #5f5f6b;
+  --tw-outline: #777783;
+  --tw-outline-variant: #c7c7d1;
+  --tw-success: #16794b;
+  --tw-success-container: #d7f6e5;
+  --tw-warning: #8a5100;
+  --tw-warning-container: #ffe9c2;
+  --tw-error: #ba1a1a;
+  --tw-error-container: #ffdad6;
+
+  /* 形态 token（indigo：cardRadius 16 / controlRadius 12 / pillRadius 100 / gap 12 /
+     pagePadH 20 / pagePadTop 16 / pagePadBottom 24 / cardPad 16 / barPadTop 14 / barPadBottom 12 /
+     contentMaxDp 640 / elevation 1） */
+  --radius-card: 16px;
+  --radius-control: 12px;
+  --radius-pill: 100px;
+  --gap: 12px;
+  --page-pad-h: 20px;
+  --page-pad-top: 16px;
+  --page-pad-bottom: 24px;
+  --card-pad: 16px;
+  --bar-pad-top: 14px;
+  --bar-pad-bottom: 12px;
+  --content-max: 640px;
+  --card-elevation: 1;
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+
+  /* FS token（§4.3，sp 数值直作 px） */
+  --fs-title: 22px;
+  --fs-section: 14px;
+  --fs-card-title: 17px;
+  --fs-metric: 24px;
+  --fs-body: 15px;
+  --fs-value: 14px;
+  --fs-caption: 13px;
+  --fs-chip: 12px;
+}

@@ -1,0 +1,18 @@
+[package]
+name = "tw-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tw-bridge"
+path = "src/main.rs"
+
+[dependencies]
+tw-core.workspace = true
+dirs = "5"
+axum = "0.8"
+tokio = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde_json.workspace = true
+futures-util.workspace = true

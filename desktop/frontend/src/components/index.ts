@@ -1,0 +1,12 @@
+// 组件出口（§8.1 原子清单）
+export { Text, Mono, Caption, LabelValue } from './text'
+export type { FsName } from './text'
+export { ScrollPage, Card, SectionTitle, Row, Divider } from './layout'
+export type { CardTone } from './layout'
+export { Chip, StatusChip, Dot } from './chips'
+export type { ChipKind } from './chips'
+export { ActionButton, LinkPill, AccountBar, SearchInput, ShareBar } from './buttons'
+export type { ButtonVariant, ButtonState } from './buttons'
+export { ConfirmDialog, PickerDialog, TimePicker, TimePickerDialog, DiagnoseDialog, copyDiagnose } from './dialogs'
+export type { PickerRow } from './dialogs'
+export { ToastStack } from './ToastStack'
