@@ -79,15 +79,17 @@ jobs:
         working-directory: desktop/frontend
         run: npm ci
 
-      - name: Build tauri app (windows)
-        uses: tauri-apps/tauri-action@v0
-        with:
-          configPath: desktop/apps/tw-app/tauri.conf.json
-          args: --no-bundle
+      - name: Build frontend (dist for tauri assets)
+        working-directory: desktop/frontend
+        run: npm run build
+
+      - name: Build tauri app (windows, portable exe)
+        working-directory: desktop
+        run: cargo build --release -p tw-app
 
       - name: Upload tauri exe
         uses: actions/upload-artifact@v4
         with:
           name: TraeWork2API-desktop-windows-${{ github.sha }}
           path: desktop/target/release/*.exe
-          if-no-files-found: warn
+          if-no-files-found: error
