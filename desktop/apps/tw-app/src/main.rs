@@ -6,6 +6,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Emitter as _;
+use tauri::Manager as _;
 
 static EXITING: AtomicBool = AtomicBool::new(false);
 
