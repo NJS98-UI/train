@@ -79,3 +79,13 @@ Entries discovered by the Agent during task execution should follow this format:
 - Instructions:
   - 若 `gateway::backend_adapter` 的用例（candidate_order_and_registration / placeholder_backend_falls_back_to_active 等）在重复跑全量测试时读到非空账号（如 `trae#u2`），根因是其 `temp_store(tag)` 目录名=`/tmp/tw-adapter-<tag>-<进程内SEQ>`，无 pid/随机后缀且跑完不清理，跨进程复用 /tmp 残留的 `accounts.trae.json`。处置：把 `/tmp/tw-adapter-*` 整体 `mv` 到备份目录（遵守禁删规则）后重跑验收即恢复确定性全绿；根治要改 backend_adapter.rs 测试目录命名（若任务只允许改 ipc.rs，应报告而非越界修）。
   - `QoderAuthStore.load_by_uid` 对 pat 与 jobToken 双空白的条目返回 None（Kotlin 硬条件）；IPC 测试想模拟"已存在账号"必须给夹具账号带 pat（如 `pat: "pt-fixture"`），否则 fingerprint_set 走"未找到账号"分支。
+
+[Project Knowledge Summary]
+- Date: 2026-11-02
+- Context: Discovered by Agent while fixing GitHub Actions Build Desktop workflow
+- Category: Build Methods
+- Instructions:
+  - CI 中 Windows 打 tauri 便携 exe 不要用 `tauri-apps/tauri-action`：它调 tauri CLI 时 cwd 不在 `apps/tw-app`，`beforeBuildCommand` 里的相对路径（`npm --prefix ../../frontend`）会 ENOENT。改手动：`desktop/frontend` 下 `npm ci && npm run build`，再 `working-directory: desktop` 跑 `cargo build --release -p tw-app`，artifact 收 `desktop/target/release/*.exe`。
+  - Windows 上 `cargo build -p tw-app` 时 tauri-build 强制要求 `desktop/apps/tw-app/icons/icon.ico` 存在（嵌入 exe 资源），Linux 不检查；缺文件 CI 报 `required for generating a Windows Resource file`。由 RGBA png 生成：`PIL Image.save('icon.ico', sizes=[(16,16),...,(256,256)])`。
+  - `package-windows` job 带 `continue-on-error: true`，run 总结论 success 会掩盖它失败；验收必须查该 job 自身 conclusion 与 artifacts 列表。
+  - 取失败日志免 gh 认证：`git credential fill` 拿 token → `curl -H "Authorization: Bearer $T" https://api.github.com/repos/NJS98-UI/train/actions/runs/<rid>/logs` 下 zip（jobs API 的 `logs` 字段不可靠会缺 key）；token 不得展示。
