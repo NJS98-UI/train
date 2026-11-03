@@ -87,6 +87,13 @@ jobs:
         working-directory: desktop
         run: cargo build --release -p tw-app
 
+      - name: UPX compress exe
+        shell: pwsh
+        run: |
+          choco install upx -y --no-progress
+          upx --best --lzma desktop/target/release/tw-app.exe
+          upx -t desktop/target/release/tw-app.exe
+
       - name: Upload tauri exe
         uses: actions/upload-artifact@v4
         with:
