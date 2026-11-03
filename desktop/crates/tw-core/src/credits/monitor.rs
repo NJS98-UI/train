@@ -487,6 +487,7 @@ mod tests {
     #[test]
     fn write_through_keeps_stale_value_with_error() {
         // 失败条目保留旧 remaining / at，只写 error（§6 规则 9）
+        let _g = crate::credits::GLOBAL_TEST_LOCK.blocking_lock();
         account::put_item(account::Item::new(account::TRAE, "w1", Some(300.0), false, None, 42));
         write_through(account::TRAE, "w1", None, true);
         let it = account::snapshot().trae("w1").cloned().unwrap();

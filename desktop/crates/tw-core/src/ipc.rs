@@ -764,6 +764,8 @@ mod tests {
     #[tokio::test]
     async fn smoke_all_commands_shapes() {
         init_tmp();
+        // credits_snapshot / refresh_all 读写进程级全局快照，与 credits 用例互斥（整段持有防 await 穿插）
+        let _global_guard = crate::credits::GLOBAL_TEST_LOCK.lock().await;
 
         let v = call("service_status", json!({})).await.unwrap();
         has_keys(&v, &["running", "port", "shouldRun", "hasUserIntent"]);

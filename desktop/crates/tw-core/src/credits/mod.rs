@@ -18,6 +18,11 @@ pub use account::{
     format_value, is_fresh, item_key, label_of, load_cache, save_cache, snapshot, Snapshot as AccountSnapshot, Item, TTL_MS,
 };
 pub use account::{fetch_all, fetch_one, refresh_all};
+
+/// 测试专用：进程级 SNAPSHOT/STORE 是生产设计的全局单例，无法重置；
+/// 串行化所有触碰 [`account`] 全局快照的用例（否则并行下互相污染，CI 顺序漂移即翻车）。
+#[cfg(test)]
+pub(crate) static GLOBAL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub use monitor::{
     current_snapshot, emit_snapshot, note_forwarded, note_forwarded_at, should_poll, snapshot_json, snapshot_json_now,
     MonitorSnapshot, DEFAULT_INTERVAL_SEC, FORWARD_POLL_MIN_MS, MIN_THRESHOLD,

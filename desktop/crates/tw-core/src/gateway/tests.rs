@@ -2,7 +2,6 @@
 //! 本文件覆盖：鉴权 key / 错误形状 / failover 控制流（mock ChatBackend 注入）/ loopback 端到端。
 
 use super::*;
-use futures_util::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -72,7 +71,7 @@ fn err_done(e: &str) -> Frame {
 }
 
 struct Harness {
-    server: Server,
+    _server: Server,
     inner: Arc<Inner>,
     records: Arc<Mutex<Vec<Record>>>,
 }
@@ -82,7 +81,7 @@ fn harness(backends: Vec<(String, Arc<dyn ChatBackend>)>) -> Harness {
     let records: Arc<Mutex<Vec<Record>>> = Arc::new(Mutex::new(Vec::new()));
     let r2 = records.clone();
     server.set_on_usage(Arc::new(move |rec| r2.lock().push(rec)));
-    Harness { inner: server.inner.clone(), server, records }
+    Harness { inner: server.inner.clone(), _server: server, records }
 }
 
 fn cand(id: &str, b: Arc<MockBackend>) -> Cand {

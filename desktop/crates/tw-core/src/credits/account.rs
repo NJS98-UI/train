@@ -579,6 +579,7 @@ mod tests {
 
     #[test]
     fn global_snapshot_and_forget_are_local_only() {
+        let _g = crate::credits::GLOBAL_TEST_LOCK.blocking_lock();
         let mut s = Snapshot::default();
         s.items.insert(item_key(TRAE, "keep"), Item::new(TRAE, "keep", Some(1.0), false, None, 1));
         s.items.insert(item_key(TRAE, "drop"), Item::new(TRAE, "drop", Some(2.0), false, None, 1));
