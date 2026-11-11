@@ -168,10 +168,29 @@ class MainActivity : Activity() {
      */
     private var authFailedUid: String? = null
 
+    /**
+     * 打标记那一刻该账号的 expiresAt（unix 秒；0=未知）。
+     *
+     * 为什么记录它：续期成功的唯一铁证是 **expiresAt 被推得更远**——401 本身不改变
+     * expiresAt，只有换发新 token 才会。后台任何一条链路（聊天自愈/签到/积分查询）
+     * 续期成功后，凭据就活了，UI 不该继续喊"需重新登录"——否则用户会去重登一个
+     * 其实已经修好的号（"失效救不回来"的观感多半来自这里）。
+     */
+    private var authFailedExpiresAt: Long = 0L
+
     /** 该账号是否已被服务端拒绝（本页实测 + 积分条目两个来源，都按 uid 查）。 */
     private fun authFailedFor(uid: String?): Boolean {
         if (uid.isNullOrBlank()) return false
-        if (authFailedUid == uid) return true
+        if (authFailedUid == uid) {
+            // 标记之后 expiresAt 被推新 → 有链路已把这个号续活，标记自动摘除
+            val exp = runCatching { TraeAuthStore.loadByUid(this, uid)?.expiresAt ?: 0L }.getOrNull() ?: 0L
+            if (exp > authFailedExpiresAt) {
+                authFailedUid = null
+                authFailedExpiresAt = 0L
+                return false
+            }
+            return true
+        }
         // 积分条目本来就是按 uid 存的，弹窗里显示的也是它 —— 两处必须同源，否则又对不上
         return AccountCredits.current().trae(uid)?.error == "需重新登录"
     }
@@ -635,6 +654,8 @@ class MainActivity : Activity() {
                     addView(labelValue("区域", regionLabelFull(traeCred.region)), top(10))
                     addView(labelValue("UID", traeCred.uid), top(4))
                     addView(labelValue("Token", tokenRenewLabel(traeCred.uid, traeCred.expiresAt)), top(4))
+                    // 「已失效/已过期」≠ 死：refresh token 活着就能强制续期原地复活，不用重新扫码
+                    addView(linkAction("修复凭据（强制续期）") { repairTraeAccount(traeCred.uid) }, top(2))
                     addView(creditLabel(AccountCredits.TRAE, traeCred.uid), top(6))
                     // 卡上直接签到：不用滚到页面底部的一键签到
                     addView(row(8) {
@@ -696,6 +717,8 @@ class MainActivity : Activity() {
                             weighted(),
                         )
                     }, top(12))
+                    // 修复凭据：jobToken 失效时强制重续一次（PAT 还活着就能原地救活）
+                    addView(linkAction("修复凭据（重续 jobToken）") { repairQoderAccount(qActiveMeta.uid) }, top(2))
                 }
                 // 设备身份：**所有 Qoder 账号都显示入口**（以前只对国际版显示，
                 // 用户在国内版上找不到它）。
@@ -866,6 +889,11 @@ class MainActivity : Activity() {
                 if (m.uid == active) {
                     addView(text("\u2713", FS_CARD_TITLE, true, "success"), lp(-2, -2, start = 10))
                 }
+                // 「修复」强制续期：refresh token 还活着时，把"已过期/被判废"的账号原地救活
+                addView(text("修复", FS_CHIP, false, "primary").apply {
+                    setPadding(dp(12), dp(4), dp(2), dp(4))
+                    setOnClickListener { repairTraeAccount(m.uid) }
+                }, lp(-2, -2, start = 6))
                 addView(text("删除", FS_CHIP, false, "error").apply {
                     setPadding(dp(12), dp(4), dp(2), dp(4))
                     setOnClickListener {
@@ -916,6 +944,11 @@ class MainActivity : Activity() {
                 if (m.uid == active) {
                     addView(text("\u2713", FS_CARD_TITLE, true, "success"), lp(-2, -2, start = 10))
                 }
+                // 「修复」强制重续 jobToken：401 救急同款路径，PAT/jobToken 还活着就能原地救活
+                addView(text("修复", FS_CHIP, false, "primary").apply {
+                    setPadding(dp(12), dp(4), dp(2), dp(4))
+                    setOnClickListener { repairQoderAccount(m.uid) }
+                }, lp(-2, -2, start = 6))
                 addView(text("删除", FS_CHIP, false, "error").apply {
                     setPadding(dp(12), dp(4), dp(2), dp(4))
                     setOnClickListener {
@@ -1593,28 +1626,47 @@ class MainActivity : Activity() {
     // 账号导出 / 导入（JSON）
     // ------------------------------------------------------------------
 
-    /** 导出：生成备份 JSON → 弹保存框（SAF 写文件）。写失败会 toast，内容不会丢（留在内存直到本次结果返回）。 */
+    /**
+     * 导出第一步：**总是**让用户勾选要带走的账号（Trae + Qoder 合在一个列表里）。
+     * 1 个账号也弹 —— 行为一致比省一次点击重要，用户才知道"原来可以选择性带"。
+     */
     private fun exportAccounts() {
-        val json = runCatching { AccountBackup.exportAll(this) }
-            .getOrElse { toast("导出失败：${it.message}"); return }
-        pendingExportJson = json
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/json"
-            putExtra(Intent.EXTRA_TITLE, "traework2api-accounts.json")
+        val items = ArrayList<PickItem>()
+        TraeAuthStore.list(this).forEach { m ->
+            items += PickItem(
+                uid = "trae:${m.uid}",
+                title = m.nickname.ifBlank { m.uid },
+                subtitle = regionLabel(m.region),
+            )
         }
-        runCatching { startActivityForResult(intent, REQ_EXPORT) }
-            .onFailure {
-                // 没有文件选择器时退回剪贴板，至少不空手而归。
-                copyToClipboard("accountBackup", json, "未找到保存对话框，已改为复制到剪贴板")
-                pendingExportJson = null
+        QoderAuthStore.list(this).forEach { m ->
+            items += PickItem(
+                uid = "qoder:${m.uid}",
+                title = m.name.ifBlank { m.uid },
+                subtitle = if (m.mode == QoderAuthApi.MODE_GLOBAL) "国际版" else "国内版",
+            )
+        }
+        if (items.isEmpty()) { toast("还没有账号可导出"); return }
+        promptPickAccounts("导出账号", "勾选要写进这个文件的账号（共 ${items.size} 个）。文件含明文 token/PAT，请妥善保管。", items, "导出") { sel ->
+            val tUids = sel.filter { it.startsWith("trae:") }.map { it.removePrefix("trae:") }.toSet()
+            val qUids = sel.filter { it.startsWith("qoder:") }.map { it.removePrefix("qoder:") }.toSet()
+            val json = runCatching { AccountBackup.exportAll(this, tUids, qUids) }.getOrElse {
+                toast("导出失败：${it.message}"); return@promptPickAccounts
             }
-    }
-
-    private fun copyAccountsJson() {
-        val json = runCatching { AccountBackup.exportAll(this) }
-            .getOrElse { toast("导出失败：${it.message}"); return }
-        copyToClipboard("accountBackup", json, "账号 JSON 已复制到剪贴板（含明文 token，请妥善保管）")
+            pendingExportJson = json
+            val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/json"
+                // 文件名写**真实**条数：exportJson 会跳过解不开 token 的账号，勾选数 ≠ 条数
+                putExtra(Intent.EXTRA_TITLE, "traework2api-backup-${AccountBackup.countTotal(json)}accounts.json")
+            }
+            runCatching { startActivityForResult(intent, REQ_EXPORT) }
+                .onFailure {
+                    // 没有文件选择器时退回剪贴板，至少不空手而归。
+                    copyToClipboard("accountBackup", json, "未找到保存对话框，已改为复制到剪贴板")
+                    pendingExportJson = null
+                }
+        }
     }
 
     private fun importAccounts() {
@@ -1623,7 +1675,117 @@ class MainActivity : Activity() {
             type = "*/*"
         }
         runCatching { startActivityForResult(intent, REQ_IMPORT) }
-            .onFailure { toast("未找到文件选择器；可用剪贴板方式：先复制 JSON，再…") }
+            .onFailure { toast("未找到文件选择器") }
+    }
+
+    /**
+     * 导入第一步：先出示"会发生什么"（新增/更新/跳过各几个），再让用户勾。
+     *
+     * 为什么必须先预览：导入是**合并**不是替换，且 Trae 的 refresh token 是轮换的——
+     * 旧备份覆盖本地新凭据，等于把还能用的 refresh token 换成死值（错一次就得重新扫码登录）。
+     * 预览把这件事摊开，而不是导完再告诉他"跳过 3 个"。
+     */
+    private fun promptImportPreview(text: String) {
+        val previews = runCatching { AccountBackup.previewImport(this, text) }.getOrElse {
+            toast(it.message ?: "JSON 无效"); return
+        }
+        if (previews.isEmpty) { toast("备份里没有可导入的账号"); return }
+
+        val items = ArrayList<PickItem>()
+        previews.trae.forEach { p ->
+            items += PickItem(
+                uid = "trae:${p.uid}",
+                title = p.nickname.ifBlank { p.uid },
+                subtitle = importRowSubtitle(p.status, p.localExpiresAt, p.fileExpiresAt),
+                chipText = when (p.status) {
+                    TraeAuthStore.ImportStatus.ADD -> "新增"
+                    TraeAuthStore.ImportStatus.UPDATE -> "更新"
+                    TraeAuthStore.ImportStatus.SKIP -> "跳过"
+                },
+                chipBg = when (p.status) {
+                    TraeAuthStore.ImportStatus.ADD -> "success_container"
+                    TraeAuthStore.ImportStatus.UPDATE -> "primary_container"
+                    TraeAuthStore.ImportStatus.SKIP -> "surface_container"
+                },
+                chipFg = when (p.status) {
+                    TraeAuthStore.ImportStatus.ADD -> "success"
+                    TraeAuthStore.ImportStatus.UPDATE -> "primary"
+                    TraeAuthStore.ImportStatus.SKIP -> "on_surface_variant"
+                },
+                // 跳过项不给勾：勾了也会被合并规则再判一次跳过，白白给用户"能覆盖"的错觉
+                selectable = p.status != TraeAuthStore.ImportStatus.SKIP,
+                checked = p.status != TraeAuthStore.ImportStatus.SKIP,
+            )
+        }
+        previews.qoder.forEach { p ->
+            items += PickItem(
+                uid = "qoder:${p.uid}",
+                title = p.name.ifBlank { p.uid },
+                subtitle = if (p.mode == QoderAuthApi.MODE_GLOBAL) "国际版" else "国内版",
+                chipText = if (p.added) "新增" else "更新",
+                chipBg = if (p.added) "success_container" else "primary_container",
+                chipFg = if (p.added) "success" else "primary",
+            )
+        }
+
+        val added = previews.trae.count { it.status == TraeAuthStore.ImportStatus.ADD } + previews.qoder.count { it.added }
+        val updated = previews.trae.count { it.status == TraeAuthStore.ImportStatus.UPDATE } + previews.qoder.count { !it.added }
+        val skipped = previews.trae.count { it.status == TraeAuthStore.ImportStatus.SKIP }
+
+        // 全是"跳过"：没有可勾的行，也别摆一个点不动的「导入」——直接说清原因收场
+        if (added + updated == 0) {
+            confirmDialog(
+                "导入账号",
+                "文件里 ${items.size} 个账号，本地凭据都比它新且没过期，导进来也会被跳过。\n" +
+                    "这不叫失败——本地已经是最新的了，不需要覆盖。",
+                "知道了",
+                cancelText = null,
+            ) {}
+            return
+        }
+
+        val message = "文件里 ${items.size} 个：新增 $added，更新 $updated" +
+            (if (skipped > 0) "，跳过 $skipped" else "") + "。\n" +
+            "「跳过」= 本地这条凭据更新且还没过期 —— 覆盖会把能用的 refresh token 换成旧的。"
+
+        promptPickAccounts("导入账号", message, items, "导入") { sel ->
+            val tUids = sel.filter { it.startsWith("trae:") }.map { it.removePrefix("trae:") }.toSet()
+            val qUids = sel.filter { it.startsWith("qoder:") }.map { it.removePrefix("qoder:") }.toSet()
+            thread(name = "account-import") {
+                val summary = runCatching { AccountBackup.importAll(this, text, tUids, qoderUids = qUids) }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    summary.fold(onSuccess = { s ->
+                        // 跳过要解释清楚：用户把旧备份导回同一台机器时全被跳过，不说明会以为失败
+                        val note = if (s.skipped > 0) "，跳过 ${s.skipped}（本地凭据更新）" else ""
+                        toast("导入完成：新增 ${s.added}，更新 ${s.updated}$note")
+                        qoderRemaining = null
+                        accountBalance = null
+                        accountCheckin = null
+                        CreditMonitor.stale = true
+                        render(currentPage)
+                    }, onFailure = { e ->
+                        toast("导入失败：${e.message ?: "JSON 无效"}")
+                    })
+                }
+            }
+        }
+    }
+
+    /** 预览行副标题：三种状态各自说清"为什么"。 */
+    private fun importRowSubtitle(status: TraeAuthStore.ImportStatus, localExp: Long, fileExp: Long): String {
+        fun expShort(sec: Long): String = when {
+            sec <= 0L -> "到期未知"
+            sec <= System.currentTimeMillis() / 1000 -> "已过期"
+            else -> SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(sec * 1000)) + "到期"
+        }
+        return when (status) {
+            TraeAuthStore.ImportStatus.ADD -> "本地没有这个账号，将新增"
+            TraeAuthStore.ImportStatus.UPDATE ->
+                "覆盖本地（本地 ${expShort(localExp)}，文件 ${expShort(fileExp)}）"
+            TraeAuthStore.ImportStatus.SKIP ->
+                "本地凭据更新（${expShort(localExp)}），已跳过"
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -1652,25 +1814,177 @@ class MainActivity : Activity() {
                         contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
                             ?: error("无法打开输入流")
                     }
-                    val summary = text.getOrNull()?.let { runCatching { AccountBackup.importAll(this, it) }.getOrNull() }
-                    val err = text.exceptionOrNull() ?: run {
-                        // 读成功但解析失败时给出原因
-                        null
-                    }
                     runOnUiThread {
-                        when {
-                            summary != null -> {
-                                toast("已导入：Trae ${summary.trae} 个 · Qoder ${summary.qoder} 个")
-                                qoderRemaining = null
-                                accountBalance = null
-                                CreditMonitor.stale = true
-                                render(currentPage)
-                            }
-                            else -> toast("导入失败：JSON 无效或没有可导入的账号${err?.let { "（${it.message}）" } ?: ""}")
-                        }
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        text.fold(
+                            onSuccess = { promptImportPreview(it) },   // 先给预览，勾完才真正写盘
+                            onFailure = { toast("读取文件失败：${it.message}") },
+                        )
                     }
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 多选弹窗（账号导出 / 导入共用）
+    // ------------------------------------------------------------------
+
+    /** 多选弹窗的一行。文案全由调用方给，这里只管"能不能选 / 默认选没选 / 右边那枚标记"。 */
+    private data class PickItem(
+        val uid: String,
+        val title: String,
+        val subtitle: String,
+        val chipText: String? = null,
+        val chipBg: String = "primary_container",
+        val chipFg: String = "primary",
+        val selectable: Boolean = true,
+        val checked: Boolean = true,
+    )
+
+    /** 自绘勾选框外观。颜色/描边全走 AppStyle，不写字面量色值。 */
+    private fun paintCheckBox(box: TextView, checked: Boolean) {
+        val radius = minOf(RADIUS_CONTROL, 6f)
+        box.text = if (checked) "✓" else ""
+        box.setTextColor(color(if (checked) "on_primary" else "on_surface_variant"))
+        box.background =
+            if (checked) shape("primary", radius) else shape("surface", radius, "outline", 2)
+    }
+
+    /**
+     * 单行：勾选框 + 两行文案 + 右侧标记。整行可点，行高 56dp（触控目标远大于 48dp）。
+     *
+     * @return (行 View, "把勾选态改成 X"的重绘函数) —— 后半段给"全选/清空"用。
+     */
+    private fun pickRow(
+        item: PickItem,
+        checked: Boolean,
+        onToggle: (Boolean) -> Unit,
+    ): Pair<View, (Boolean) -> Unit> {
+        var on = checked
+        val box = TextView(this).apply {
+            gravity = Gravity.CENTER
+            textSize = FS_CHIP.toFloat()
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        paintCheckBox(box, on)
+
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(text(
+                item.title, FS_VALUE, true,
+                if (item.selectable) "on_surface" else "on_surface_variant",
+            ).apply {
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+            addView(caption(item.subtitle).apply {
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }, top(2))
+        }
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            setPadding(0, dp(6), 0, dp(6))
+            if (item.selectable) addView(box, lp(dp(22), dp(22), end = 12))
+            addView(texts, weighted())
+            item.chipText?.let { addView(chip(it, item.chipBg, item.chipFg), lp(-2, -2, start = 10)) }
+        }
+
+        fun applyState(state: Boolean) {
+            on = state
+            paintCheckBox(box, state)
+            row.contentDescription = if (!item.selectable) {
+                "${item.title}，不可选（${item.chipText ?: "已跳过"}）"
+            } else {
+                item.title + if (state) "，已选中" else "，未选中"
+            }
+        }
+
+        applyState(on)
+        if (item.selectable) row.setOnClickListener {
+            applyState(!on)
+            onToggle(on)
+        }
+        return row to { want -> if (item.selectable) applyState(want) }
+    }
+
+    /**
+     * 账号多选弹窗（不引 androidx 依赖，自绘）。
+     *
+     * 三条硬约束：
+     *  - 列表**必须限高滚动**：确定/取消按钮是内容末尾的最后一个 View，行一多按钮会被顶出屏幕；
+     *  - 点一行只重绘**该行 + 计数行**，绝不 render()/redraw() —— 那会重建整页、滚回页首；
+     *  - 一个都没选时提示但不静默吞掉操作。
+     */
+    private fun promptPickAccounts(
+        title: String,
+        message: String,
+        items: List<PickItem>,
+        okText: String,
+        onConfirm: (Set<String>) -> Unit,
+    ) {
+        val selected = items.filter { it.selectable && it.checked }.map { it.uid }.toMutableSet()
+        val appliers = arrayOfNulls<(Boolean) -> Unit>(items.size)
+        val selectableCount = items.count { it.selectable }
+
+        val countLabel = text("", FS_CAPTION, true, "on_surface_variant")
+        var allBtn: TextView? = null
+
+        fun refreshCount() {
+            countLabel.text = if (selected.isEmpty()) "已选 0 个 · 至少选 1 个" else "已选 ${selected.size} 个"
+            countLabel.setTextColor(color(if (selected.isEmpty()) "warning" else "on_surface_variant"))
+            allBtn?.text = if (selectableCount > 0 && selected.size == selectableCount) "清空" else "全选"
+        }
+
+        allBtn = linkAction("全选") {
+            val selectAll = selected.size < selectableCount
+            selected.clear()
+            if (selectAll) selected += items.filter { it.selectable }.map { it.uid }
+            items.forEachIndexed { i, item ->
+                appliers[i]?.invoke(item.selectable && item.uid in selected)
+            }
+            refreshCount()
+        }
+
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        items.forEachIndexed { i, item ->
+            val (rowView, apply) = pickRow(item, item.uid in selected) { isOn ->
+                if (isOn) selected += item.uid else selected -= item.uid
+                refreshCount()
+            }
+            appliers[i] = apply
+            list.addView(rowView, LinearLayout.LayoutParams(-1, -2))
+            if (i < items.lastIndex) list.addView(divider())
+        }
+        refreshCount()
+
+        // 行高固定 56dp，列表高度算得准；超出上限就在框内滚
+        val rowsHeight = dp(56) * items.size + dp(1) * maxOf(0, items.size - 1)
+        val maxHeight = minOf(dp(280), (resources.displayMetrics.heightPixels * 0.35f).toInt())
+        val scroller = ScrollView(this).apply {
+            isFillViewport = false
+            addView(list, FrameLayout.LayoutParams(-1, -2))
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(row(6) {
+                addView(countLabel, weighted())
+                addView(allBtn, lp(-2, -2))
+            })
+            addView(scroller, lp(-1, minOf(rowsHeight, maxHeight), top = 6))
+        }
+
+        confirmDialog(
+            title = title,
+            message = message,
+            okText = okText,
+            content = body,
+        ) {
+            if (selected.isEmpty()) toast("至少选择 1 个账号") else onConfirm(selected.toSet())
         }
     }
 
@@ -1779,16 +2093,72 @@ class MainActivity : Activity() {
         // 切走再切回来仍应保留（否则要重新撞一次 401 才知道）。
     }
 
-    /** Token 是否需要续期：过期则需重新登录，临近则由后台自动用 refresh 续期。 */
+    /** Token 状态标签：过期 ≠ 死（refresh token 活着就能自动续），措辞必须给用户"可修复"的路。 */
     private fun tokenRenewLabel(uid: String, expiresAt: Long): String {
         // 只看到期时间会说谎：token 可能"没过期但已被服务端拒绝"。
         // 有实测证据（查额度/签到撞 401/1001）时以证据为准 —— 但证据必须是**这个账号**的。
-        if (authFailedFor(uid)) return "需重新登录"
+        if (authFailedFor(uid)) return "已失效 · 可点「修复凭据」重试"
         if (expiresAt <= 0L) return "未知（无到期信息）"
         val remainSec = expiresAt - System.currentTimeMillis() / 1000
-        return if (remainSec <= 0) "已过期 · 需重新登录"
+        return if (remainSec <= 0) "已过期 · 转发时自动续期，或点「修复凭据」"
         else if (remainSec <= SIXTY_MINUTES_SEC) "临近到期 · 将自动续期"
         else "有效"
+    }
+
+    // ------------------------------------------------------------------
+    // 「修复凭据」：把"看起来死了"的账号原地救活
+    // ------------------------------------------------------------------
+
+    /**
+     * Trae 账号修复：**强制**续一次 token（不看是否临期）。
+     *
+     * 大多数"账号失效"只是 access token 被提前判废或过了 expiresAt——refresh token
+     * 还活着，换一次就能原地复活，根本不用重新扫码。只有 refresh token 真死了
+     * （重放作废/被旧备份覆盖/超期未用）才救不回来，此时如实告诉用户要重登。
+     */
+    private fun repairTraeAccount(uid: String) {
+        val cred = TraeAuthStore.loadByUid(this, uid) ?: run { toast("读不到该账号的本地凭据"); return }
+        toast("正在修复…")
+        thread(name = "trae-repair-$uid") {
+            // 与续期唯一入口共用同一把锁（refresh 是轮换的，并发续期会白烧一个 refresh）
+            val t = runCatching { Gateway.locked { TraeAuthApi.forceRefreshTokenFor(this@MainActivity, cred) } }
+                .getOrNull()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (t == null) {
+                    toast("续期失败：refreshToken 已失效，该账号需要重新登录")
+                    return@runOnUiThread
+                }
+                // 修复成功的连带：清失效标记 + 清积分缓存（上面可能挂着"token 失效"的旧读数）
+                if (authFailedUid == uid) { authFailedUid = null; authFailedExpiresAt = 0L }
+                AccountCredits.forget(this@MainActivity, AccountCredits.TRAE, uid)
+                CreditMonitor.stale = true
+                val after = runCatching { TraeAuthStore.loadByUid(this@MainActivity, uid) }.getOrNull()
+                toast(if (after != null && after.expiresAt > cred.expiresAt) "已修复：token 已续期" else "已刷新凭据")
+                render(Page.ACCOUNT)
+            }
+        }
+    }
+
+    /** Qoder 账号修复：强制重续一次 jobToken（401 救急同款路径）。 */
+    private fun repairQoderAccount(uid: String) {
+        val cred = QoderAuthStore.loadByUid(this, uid) ?: run { toast("读不到该账号的本地凭据"); return }
+        toast("正在修复…")
+        thread(name = "qoder-repair-$uid") {
+            val jt = runCatching { QoderAuthApi.forceRefreshJobToken(this@MainActivity, cred) }.getOrNull()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (jt == null) {
+                    toast("续期失败：jobToken 刷新不动，请重新登录该 Qoder 账号")
+                    return@runOnUiThread
+                }
+                AccountCredits.forget(this@MainActivity, AccountCredits.QODER, uid)
+                CreditMonitor.stale = true
+                qoderRemaining = null
+                toast("已修复：jobToken 已续期")
+                render(Page.ACCOUNT)
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -2461,9 +2831,10 @@ class MainActivity : Activity() {
                 accountCheckin = c ?: accountCheckin
                 // 按**这个账号**记：成功就清掉它的标记，失败且是鉴权问题才置上
                 if (c != null) {
-                    if (authFailedUid == cred.uid) authFailedUid = null
+                    if (authFailedUid == cred.uid) { authFailedUid = null; authFailedExpiresAt = 0L }
                 } else if (TraeUpstream.lastAuthFailed) {
                     authFailedUid = cred.uid
+                    authFailedExpiresAt = cred.expiresAt
                 }
                 quotaLoading = false
                 toast(if (u == null) "未获取到额度" else "已更新")

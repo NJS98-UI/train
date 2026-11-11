@@ -233,10 +233,15 @@ object QoderAuthStore {
     // 导出 / 导入（JSON 明文，含 PAT）
     // ------------------------------------------------------------------
 
-    /** 导出全部 Qoder 账号为 JSON（⚠️ 含明文 PAT/jobToken/jrt，理由见 [TraeAuthStore.exportJson]）。 */
-    fun exportJson(context: Context): String {
+    /**
+     * 导出 Qoder 账号为 JSON（⚠️ 含明文 PAT/jobToken/jrt，理由见 [TraeAuthStore.exportJson]）。
+     *
+     * @param uids 只导出这些 uid（null = 全部）。解不开的账号照旧跳过，
+     *   文件名条数请用 [countAccounts]。
+     */
+    fun exportJson(context: Context, uids: Set<String>? = null): String {
         val arr = JSONArray()
-        for (m in readIndex(context)) {
+        for (m in readIndex(context).filter { uids == null || it.uid in uids }) {
             val c = loadByUid(context, m.uid) ?: continue
             arr.put(JSONObject()
                 .put("uid", c.uid).put("name", c.name).put("email", c.email).put("mode", c.mode)
@@ -250,25 +255,57 @@ object QoderAuthStore {
                 // 设备身份也要带走：不然换机/重装后抓包指纹丢了，只能重新派生成"本机派生"
                 .put("fingerprint", fingerprint(context, c.uid)?.let { encodeFingerprint(it) } ?: ""))
         }
+        val active = activeUid(context).orEmpty()
         return JSONObject()
             .put("format", EXPORT_FORMAT).put("version", 1)
-            .put("activeUid", activeUid(context).orEmpty()).put("accounts", arr)
+            .put("activeUid", if (uids == null || active in uids) active else "")
+            .put("accounts", arr)
             .toString(2)
     }
 
-    /** 从 [exportJson] 的 JSON 导入（按 uid 合并，不动当前号除非带 activeUid）。返回导入数。 */
-    fun importJson(context: Context, json: String): Int {
-        val rootOpt = try { JSONObject(json) } catch (_: Exception) { null }
-        val accounts = if (rootOpt != null) rootOpt.optJSONArray("accounts") ?: JSONArray()
+    /** 文件里的真实条数（[exportJson] 会跳过解不开的账号，勾选数 ≠ 条数）。 */
+    fun countAccounts(json: String): Int =
+        runCatching { JSONObject(json).optJSONArray("accounts")?.length() ?: 0 }.getOrDefault(0)
+
+    /** Qoder 导入结果。PAT 不轮换，覆盖没有"换死活凭据"的风险，所以**没有 SKIP**，只有新增/更新。 */
+    data class QImportReport(val added: Int, val updated: Int) {
+        val total: Int get() = added + updated
+    }
+
+    /** 导入预览的一行（Qoder 版：只有 ADD/UPDATE 两种）。 */
+    data class QImportPreview(
+        val uid: String,
+        val name: String,
+        val mode: String,
+        val added: Boolean,   // true=新增，false=覆盖本地已有账号
+    )
+
+    /**
+     * 预览导入会发生什么：纯内存，不写盘。解析口径与 [importJson] 共用 [parseAccounts]，
+     * 预览答应几个、导入就进几个。
+     */
+    fun previewImport(context: Context, json: String): List<QImportPreview> {
+        val (_, parsed, _) = parseAccounts(json)
+        val local = readIndex(context).associateBy { it.uid }
+        return parsed.map { cred ->
+            QImportPreview(cred.uid, cred.name, cred.mode, added = cred.uid !in local)
+        }
+    }
+
+    /** 解析 + 校验（纯内存），[importJson]/[previewImport] 共用，两边口径分叉会"预览骗人"。 */
+    private fun parseAccounts(json: String): Triple<JSONObject, List<QCred>, Map<String, String>> {
+        val root = try { JSONObject(json) } catch (_: Exception) { null }
+        val accounts = if (root != null) root.optJSONArray("accounts") ?: JSONArray()
         else try { JSONArray(json) } catch (e: Exception) { throw IllegalArgumentException("不是有效的 Qoder 账号 JSON") }
-        var imported = 0
+        val parsed = ArrayList<QCred>()
+        val fps = HashMap<String, String>()
         for (i in 0 until accounts.length()) {
             val o = accounts.optJSONObject(i) ?: continue
             val uid = o.optString("uid", "").takeIf { it.isNotBlank() } ?: continue
             val pat = o.optString("pat", "")
             val jt = o.optString("jobToken", "")
             if (pat.isBlank() && jt.isBlank()) continue
-            val cred = QCred(
+            parsed += QCred(
                 pat = pat, jobToken = jt, jobRefreshToken = o.optString("jobRefreshToken", ""),
                 expiresAt = o.optLong("expiresAt", 0L), uid = uid,
                 name = o.optString("name", ""), email = o.optString("email", ""),
@@ -280,21 +317,45 @@ object QoderAuthStore {
                 isDataPolicyModifiable = o.optBoolean("isDataPolicyModifiable", true),
             )
             // 指纹是可选的：老备份没有这个字段，缺了就当"用本机派生"
-            o.optString("fingerprint", "").takeIf { it.isNotBlank() }
-                ?.let { raw -> decodeFingerprint(raw)?.let { setFingerprint(context, uid, it) } }
-            val p = prefs(context)
-            p.edit()
-                .putString(patKey(uid), encrypt(cred.pat))
-                .putString(jtKey(uid), encrypt(cred.jobToken))
-                .putString(jrtKey(uid), encrypt(cred.jobRefreshToken))
-                .apply()
-            writeMeta(context, cred.toMeta())
-            imported++
+            o.optString("fingerprint", "").takeIf { it.isNotBlank() }?.let { fps[uid] = it }
         }
-        check(imported > 0) { "JSON 里没有可导入的 Qoder 账号（缺 uid 或 pat）" }
-        val active = rootOpt?.optString("activeUid", "")?.takeIf { it.isNotBlank() }
+        if (parsed.isEmpty()) throw IllegalArgumentException("JSON 里没有可导入的 Qoder 账号（缺 uid 或 pat）")
+        return Triple(root ?: JSONObject(), parsed, fps)
+    }
+
+    /**
+     * 从 [exportJson] 的 JSON 导入（按 uid 合并，不动当前号除非带 activeUid 且导入结果里有它）。
+     *
+     * @param onlyUids 只导入这些 uid（null = 全部）。被剔除的不计入报告。
+     */
+    fun importJson(context: Context, json: String, onlyUids: Set<String>? = null): QImportReport {
+        val (root, all, fps) = parseAccounts(json)
+        val parsed = if (onlyUids == null) all else all.filter { it.uid in onlyUids }
+        if (parsed.isEmpty()) return QImportReport(0, 0)
+        val localUids = readIndex(context).map { it.uid }.toHashSet()
+        var added = 0
+        var updated = 0
+        for (cred in parsed) {
+            if (cred.uid in localUids) updated++ else added++
+            // 设备身份跟着账号走：抓包真货丢了就只能重新派生，国际版领取会拿不到 campaign
+            fps[cred.uid]?.let { raw -> decodeFingerprint(raw)?.let { setFingerprint(context, cred.uid, it) } }
+            writeImported(context, cred)
+        }
+        check(added + updated > 0) { "JSON 里没有可导入的 Qoder 账号（缺 uid 或 pat）" }
+        val active = root.optString("activeUid", "").takeIf { it.isNotBlank() }
         if (active != null && readIndex(context).any { it.uid == active }) setActive(context, active)
-        return imported
+        return QImportReport(added, updated)
+    }
+
+    /** 写单个账号（token + 元数据），不动当前选中账号。 */
+    private fun writeImported(context: Context, cred: QCred) {
+        val p = prefs(context)
+        p.edit()
+            .putString(patKey(cred.uid), encrypt(cred.pat))
+            .putString(jtKey(cred.uid), encrypt(cred.jobToken))
+            .putString(jrtKey(cred.uid), encrypt(cred.jobRefreshToken))
+            .apply()
+        writeMeta(context, cred.toMeta())
     }
 
     // ------------------------------------------------------------------
