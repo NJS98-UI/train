@@ -166,6 +166,18 @@ object TraeAuthApi {
         val expiresAt: Long?,       // unix 秒；null=未返回有效期
     )
 
+    /**
+     * OAuth 服务器**明确拒绝**这次换 token（HTTP 400/401/403）：refresh token 已被作废，
+     * 重试无意义。与网络/服务端故障（IOException）必须分开 —— 混淆的代价是把活号
+     * 吓成「需重新登录」（VPN 抖一下就喊死号，用户被迫重新扫码）。
+     */
+    class AuthRejectedException(message: String) : java.io.IOException(message)
+
+    /** 最近一次续期失败是否属于「明确拒绝」（true=refresh 真死了；false=网络/服务端问题，可重试）。 */
+    @Volatile
+    var lastRefreshRejected: Boolean = false
+        private set
+
     /** refresh token 换 access token（refreshToken 轮换）。网络/结构错误抛异常。
      *
      * [region] 默认取当前区域；**多账号后台续期/签到**必须传**该账号自己的区域**，
@@ -187,7 +199,11 @@ object TraeAuthApi {
             .build()
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful || resp.body == null) {
-                throw java.io.IOException("ExchangeToken http ${resp.code}: ${(resp.body?.string() ?: "").take(200)}")
+                val msg = "ExchangeToken http ${resp.code}: ${(resp.body?.string() ?: "").take(200)}"
+                // 400/401/403 = OAuth 明确拒绝这条 grant（refresh 已作废）——与网络/服务端
+                // 故障分开：前者重试无意义，后者重试就能成。
+                if (resp.code in 400..403) throw AuthRejectedException(msg)
+                throw java.io.IOException(msg)
             }
             val obj = JSONObject(resp.body!!.string())
             val result = obj.optJSONObject("Result") ?: throw java.io.IOException("ExchangeToken 缺 Result")
@@ -328,8 +344,14 @@ object TraeAuthApi {
             Log.w(TAG, "$uid 无 refreshToken，无法续期")
             return null
         }
+        lastRefreshRejected = false
         val ex = runCatching { exchangeToken(base.refreshToken, base.region) }
-            .getOrElse { Log.w(TAG, "$uid 续期失败: ${it.javaClass.simpleName}: ${it.message}"); return null }
+            .getOrElse {
+                // 分类记录：AuthRejectedException=OAuth 明确拒绝（号真死）；其余=网络/服务端问题
+                lastRefreshRejected = it is AuthRejectedException
+                Log.w(TAG, "$uid 续期失败: ${it.javaClass.simpleName}: ${it.message}")
+                return null
+            }
         val stored = runCatching { TraeAuthStore.loadByUid(context, uid) }.getOrNull()
         if (stored != null && !shouldWriteBack(base.refreshToken, stored.refreshToken)) {
             // 我们续期的这段时间里，别处又把 refreshToken 换掉了 —— 我们的结果已经过期，

@@ -2120,13 +2120,28 @@ class MainActivity : Activity() {
         val cred = TraeAuthStore.loadByUid(this, uid) ?: run { toast("读不到该账号的本地凭据"); return }
         toast("正在修复…")
         thread(name = "trae-repair-$uid") {
-            // 与续期唯一入口共用同一把锁（refresh 是轮换的，并发续期会白烧一个 refresh）
-            val t = runCatching { Gateway.locked { TraeAuthApi.forceRefreshTokenFor(this@MainActivity, cred) } }
-                .getOrNull()
+            // 网络类失败自动重试（退避 1.5s/3s）：VPN 抖一下就把活号报成死号是误导的重灾区。
+            // 只有 OAuth **明确拒绝**（400/401/403，lastRefreshRejected=true）才判定 refresh 真死。
+            var t: String? = null
+            repeat(3) { attempt ->
+                if (attempt > 0) {
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) toast("修复失败，重试中（${attempt + 1}/3）…")
+                    }
+                    Thread.sleep(1500L * attempt)
+                }
+                val r = runCatching { Gateway.locked { TraeAuthApi.forceRefreshTokenFor(this@MainActivity, cred) } }
+                    .getOrNull()
+                if (r != null) { t = r; return@repeat }
+                if (TraeAuthApi.lastRefreshRejected) return@repeat   // 明确被拒：重试无意义
+            }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (t == null) {
-                    toast("续期失败：refreshToken 已失效，该账号需要重新登录")
+                    toast(
+                        if (TraeAuthApi.lastRefreshRejected) "续期失败：refreshToken 已失效，该账号需要重新登录"
+                        else "连不上 OAuth 服务器（网络/VPN 异常），token 未判定失效——请检查网络后再点修复"
+                    )
                     return@runOnUiThread
                 }
                 // 修复成功的连带：清失效标记 + 清积分缓存（上面可能挂着"token 失效"的旧读数）
