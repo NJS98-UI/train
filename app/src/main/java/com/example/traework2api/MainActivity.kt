@@ -3080,8 +3080,14 @@ class MainActivity : Activity() {
     private fun loadAndRefreshToken() {
         thread(name = "trae-load-token") {
             // 与 credProvider **共用同一把锁**（Gateway.locked）：refresh 是轮换的，并发会互相作废。
-            Gateway.locked {
-                TraeAuthApi.restartWithValidToken(this, skewSec = SIXTY_MINUTES_SEC)
+            // runCatching 兜底：这是**启动路径**（onCreate 就会调），任何从这里抛出去的异常
+            // 都是"打开 App 秒崩 + 再也打不开"的死循环 —— 续期失败只影响这次刷新，不能杀进程。
+            runCatching {
+                Gateway.locked {
+                    TraeAuthApi.restartWithValidToken(this, skewSec = SIXTY_MINUTES_SEC)
+                }
+            }.onFailure {
+                android.util.Log.w("TraeLoadToken", "启动续期异常: ${it.javaClass.simpleName}: ${it.message}")
             }
             // 切号**不发请求**：签到状态来自本地落库（AutoCheckin 那一轮 / 手动签到）。
             // 用户要求"切换页也不要自动刷新"，所以这里只重画，不打上游。

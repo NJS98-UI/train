@@ -254,7 +254,16 @@ object TraeAuthApi {
             Log.w(TAG, "无 refreshToken，无法续期")
             return cred.accessToken.takeIf { it.isNotBlank() }
         }
-        val ex = exchangeToken(cred.refreshToken)
+        // ⚠️ 这里**绝不能让异常冲出去**（[exchangeToken] 网络/结构错误是抛异常的）：
+        // 本函数被三条要命路径裸调——App 启动（MainActivity.onCreate → loadAndRefreshToken）、
+        // 账号切换、以及**每次聊天转发的 credProvider**（Gateway.credProvider）。refresh token
+        // 已死时上游直接回错，抛出去 = 后台线程未捕获异常 → 进程崩溃；启动路径上就是
+        // "打开 App 秒崩、再也打不开"的死循环。续不动就回落到已存的（可能过期的）access
+        // token，让上层 401 自愈/换号逻辑接手 —— 失败只影响这一次请求，不杀进程。
+        val ex = runCatching { exchangeToken(cred.refreshToken) }.getOrElse {
+            Log.w(TAG, "${cred.uid} 续期失败: ${it.javaClass.simpleName}: ${it.message}")
+            return cred.accessToken.takeIf { it.isNotBlank() }
+        }
         TraeAuthStore.save(context, TraeAuthStore.Cred(
             accessToken = ex.accessToken,
             refreshToken = ex.refreshToken ?: cred.refreshToken,
